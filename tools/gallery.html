@@ -1,0 +1,417 @@
+<!DOCTYPE html>
+<html lang="pt-br">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Vale Quieto — galeria do render</title>
+<style>
+  :root { color-scheme: dark; }
+  body { margin: 0; background: #101211; color: #d8dcd0; font: 13px/1.45 Georgia, serif; }
+  header { padding: 14px 20px 6px; }
+  h1 { font-size: 20px; margin: 0 0 4px; font-weight: normal; letter-spacing: 0.5px; }
+  h2 { font-size: 15px; margin: 26px 20px 8px; font-weight: normal; color: #e8dcc0; border-bottom: 1px solid #2a2e2b; padding-bottom: 4px; }
+  p.note { margin: 0 20px 6px; color: #9aa094; font-size: 12px; }
+  .row { display: flex; flex-wrap: wrap; gap: 12px; padding: 0 20px; }
+  figure { margin: 0; background: #0b0d0c; border: 1px solid #262a27; }
+  figure canvas { display: block; max-width: 100%; }
+  figcaption { padding: 4px 8px; font-size: 12px; color: #aab0a2; }
+  #status { color: #c8b070; font-size: 12px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Vale Quieto — galeria do render</h1>
+  <div id="status">gerando…</div>
+  <p class="note" style="margin:4px 0 0">Tudo aqui é desenhado pelo mesmo pipeline do jogo (js/render*.js) a partir de um mapa sintético. Parâmetros: <code>?zoom=1&amp;hour=12</code>.</p>
+</header>
+<main id="out"></main>
+
+<script src="../js/core.js"></script>
+<script src="../js/items.js"></script>
+<script src="../js/world.js"></script>
+<script src="../js/survival.js"></script>
+<script src="../js/player.js"></script>
+<script src="../js/zombies.js"></script>
+<script src="../js/render-core.js"></script>
+<script src="../js/render-ground.js"></script>
+<script src="../js/render-walls.js"></script>
+<script src="../js/render-objects.js"></script>
+<script src="../js/render-actors.js"></script>
+<script src="../js/render-light.js"></script>
+<script src="../js/render-fx.js"></script>
+<script src="../js/render.js"></script>
+<script>
+(function () {
+  'use strict';
+  const G = window.G, F = G.FLOOR, W = G.WALL, WS = G.WS, R = G.R;
+  const P = G.params;
+  const HOUR = P.hour != null ? +P.hour : 12;
+  const ZOOM = P.zoom != null ? +P.zoom : 1;
+  const out = document.getElementById('out');
+  const status = document.getElementById('status');
+
+  // ------------------------------------------------------------------
+  // Mapa sintético
+  // ------------------------------------------------------------------
+  const MW = 200, MH = 200;
+  function makeMap() {
+    const n = MW * MH;
+    return {
+      w: MW, h: MH, floor: new Uint8Array(n).fill(F.GRASS), wall: new Uint8Array(n), wallState: new Uint8Array(n),
+      wallHp: new Float32Array(n), barricadeHp: new Float32Array(n), wallMask: new Uint8Array(n),
+      building: new Uint16Array(n), room: new Uint16Array(n), objAt: new Int32Array(n).fill(-1),
+      buildings: [], rooms: [], objects: [], spawnPoint: { x: 5, y: 5 }, zombieSpawns: [], roadMarks: [], bridges: [],
+    };
+  }
+  const m = makeMap();
+  const I = (x, y) => y * MW + x;
+  const fill = (x, y, w, h, f) => { for (let j = y; j < y + h; j++) for (let i = x; i < x + w; i++) m.floor[I(i, j)] = f; };
+  function building(o) {
+    const id = m.buildings.length + 1;
+    const b = Object.assign({ id, doors: [], parts: [{ x: o.x, y: o.y, w: o.w, h: o.h, ridgeAxis: o.w >= o.h ? 'x' : 'y' }], roofType: 'gable', ridgeAxis: o.w >= o.h ? 'x' : 'y', face: 'S', type: 'house', name: 'Casa', roofColor: '#4a4a4f', wallColor: '#c9d3d6', wall: W.WOOD }, o);
+    m.buildings.push(b);
+    for (const p of b.parts) for (let j = p.y; j < p.y + p.h; j++) for (let i = p.x; i < p.x + p.w; i++) m.building[I(i, j)] = id;
+    // paredes na borda de cada parte (sem as internas compartilhadas)
+    for (const p of b.parts) for (let j = p.y; j < p.y + p.h; j++) for (let i = p.x; i < p.x + p.w; i++) {
+      let ext = false;
+      for (let dj = -1; dj <= 1; dj++) for (let di = -1; di <= 1; di++) { const a = i + di, c = j + dj; if (a < 0 || c < 0 || a >= MW || c >= MH || m.building[I(a, c)] !== id) ext = true; }
+      if (ext) m.wall[I(i, j)] = b.wall; else if (!m.wall[I(i, j)]) m.floor[I(i, j)] = o.floor || F.WOOD;
+      if (ext) m.floor[I(i, j)] = F.WOOD;
+    }
+    return b;
+  }
+  function room(b, type, x, y, w, h, floor) {
+    const id = m.rooms.length + 1;
+    m.rooms.push({ id, building: b.id, type, x, y, w, h, loot: type });
+    for (let j = y; j < y + h; j++) for (let i = x; i < x + w; i++) { m.room[I(i, j)] = id; if (floor) m.floor[I(i, j)] = floor; }
+    return id;
+  }
+  function wallLine(x0, y0, x1, y1, type, b) {
+    const dx = Math.sign(x1 - x0), dy = Math.sign(y1 - y0);
+    let x = x0, y = y0;
+    for (;;) { m.wall[I(x, y)] = type; if (b) m.building[I(x, y)] = b; if (x === x1 && y === y1) break; x += dx; y += dy; }
+  }
+  const ODEF = G.world.OBJECT_DEFS;
+  function obj(type, x, y, rot, extra) {
+    const d = ODEF[type] || { a: 1, d: 1, ht: 0.5 };
+    const w = rot & 1 ? d.a : d.d, h = rot & 1 ? d.d : d.a;
+    const o = Object.assign({ id: m.objects.length, type, x, y, w, h, rot: rot & 3, blocksMove: !!d.block, blocksSight: !!d.sight, height: d.ht, container: null,
+      light: d.light ? Object.assign({}, d.light) : null, variant: (x * 7 + y * 3) % 8, building: m.building[I(x, y)], room: m.room[I(x, y)] }, extra || {});
+    m.objects.push(o);
+    for (let j = y; j < y + h; j++) for (let i = x; i < x + w; i++) m.objAt[I(i, j)] = o.id;
+    return o;
+  }
+  const labels = []; // {sec, x, y, text}
+
+  // ---- Seção 1: pisos (blocos 3×3) ----
+  const FLOORS = [['GRASS', 'grama'], ['DARK_GRASS', 'grama escura'], ['DIRT', 'terra'], ['GRAVEL', 'cascalho'], ['SAND', 'areia'], ['ASPHALT', 'asfalto'],
+    ['SIDEWALK', 'calçada'], ['CONCRETE', 'concreto'], ['WOOD', 'madeira'], ['TILE', 'azulejo'], ['CARPET', 'carpete'], ['LINOLEUM', 'linóleo'],
+    ['WATER', 'água'], ['DOCK', 'píer'], ['PORCH', 'varanda'], ['POOL', 'piscina']];
+  const S1 = { x: 6, y: 6 };
+  FLOORS.forEach(([k, name], n) => {
+    const x = S1.x + (n % 4) * 5, y = S1.y + ((n / 4) | 0) * 5;
+    if (k === 'DOCK') { fill(x - 1, y - 1, 5, 5, F.WATER); fill(x, y + 1, 3, 1, F.DOCK); fill(x + 1, y, 1, 3, F.DOCK); }
+    else if (k === 'POOL') fill(x, y, 3, 3, F.POOL);
+    else if (k === 'WATER') fill(x - 1, y - 1, 5, 5, F.WATER);
+    else fill(x, y, 3, 3, F[k]);
+    labels.push({ sec: 'floors', x: x + 1.5, y: y + 3.2, text: name });
+  });
+  // marcas de rua
+  fill(S1.x - 1, S1.y + 21, 22, 6, F.ASPHALT);
+  fill(S1.x - 1, S1.y + 20, 22, 1, F.SIDEWALK); fill(S1.x - 1, S1.y + 27, 22, 1, F.SIDEWALK);
+  m.roadMarks.push({ x0: S1.x - 1, y0: S1.y + 24, x1: S1.x + 9, y1: S1.y + 24, type: 'center_dashed' });
+  m.roadMarks.push({ x0: S1.x + 11, y0: S1.y + 24, x1: S1.x + 21, y1: S1.y + 24, type: 'center_solid' });
+  m.roadMarks.push({ x0: S1.x + 10.5, y0: S1.y + 21, x1: S1.x + 10.5, y1: S1.y + 27, type: 'crosswalk' });
+  m.roadMarks.push({ x0: S1.x + 8, y0: S1.y + 21, x1: S1.x + 8, y1: S1.y + 24, type: 'stop' });
+  for (let k = 0; k < 4; k++) m.roadMarks.push({ x0: S1.x + 14 + k * 2, y0: S1.y + 21, x1: S1.x + 14 + k * 2, y1: S1.y + 23, type: 'parking' });
+  labels.push({ sec: 'floors', x: S1.x + 5, y: S1.y + 28.5, text: 'faixa tracejada · pare · faixa de pedestre · faixa dupla · vagas' });
+
+  // ---- Seção 2: paredes (junções e materiais) ----
+  const S2 = { x: 50, y: 6 };
+  const MATS = [[W.WOOD, '#b7c3cc', 'tábuas'], [W.BRICK, '#9a5a45', 'tijolo'], [W.PLASTER, '#e2d6bd', 'reboco'], [W.CONCRETE, '#a8a69e', 'bloco']];
+  MATS.forEach(([wt, col, name], n) => {
+    const x = S2.x + (n % 2) * 13, y = S2.y + ((n / 2) | 0) * 13;
+    const b = building({ x, y, w: 9, h: 9, wall: wt, wallColor: col, type: wt === W.CONCRETE ? 'warehouse' : 'house' });
+    // grade interna 3×3 (L, T e +)
+    wallLine(x + 3, y + 1, x + 3, y + 7, W.PLASTER, b.id); wallLine(x + 5, y + 1, x + 5, y + 7, W.PLASTER, b.id);
+    wallLine(x + 1, y + 4, x + 7, y + 4, W.PLASTER, b.id);
+    const rt = ['living', 'bedroom', 'kitchen', 'bathroom', 'hall', 'office'];
+    let k = 0;
+    for (const [rx, rw] of [[x + 1, 2], [x + 4, 1], [x + 6, 2]]) for (const [ry, rh] of [[y + 1, 3], [y + 5, 3]]) {
+      room(b, rt[k % rt.length], rx, ry, rw, rh, [F.WOOD, F.CARPET, F.LINOLEUM, F.TILE, F.WOOD, F.CARPET][k % 6]); k++;
+    }
+    labels.push({ sec: 'walls', x: x + 4.5, y: y + 9.6, text: name + ' (junções L, T, +)' });
+  });
+  // ruína: paredes soltas de um prédio sem telhado (pilar, segmento reto, L)
+  const ru = building({ x: S2.x + 27, y: S2.y + 1, w: 1, h: 1, wall: W.BRICK, wallColor: '#8a5040', roofType: 'flat' });
+  ru.parts = []; // sem telhado
+  wallLine(S2.x + 27, S2.y + 5, S2.x + 31, S2.y + 5, W.BRICK, ru.id); wallLine(S2.x + 31, S2.y + 5, S2.x + 31, S2.y + 9, W.BRICK, ru.id);
+  labels.push({ sec: 'walls', x: S2.x + 29, y: S2.y + 10.5, text: 'pilar isolado, reta e L' });
+
+  // ---- Seção 3: portas, janelas, portões — todos os estados ----
+  const S3 = { x: 6, y: 50 };
+  const B3 = building({ x: S3.x, y: S3.y, w: 40, h: 6, wall: W.WOOD, wallColor: '#d8c0a8', roofColor: '#5b4636' });
+  room(B3, 'living', S3.x + 1, S3.y + 1, 38, 4, F.WOOD);
+  const B3b = building({ x: S3.x + 42, y: S3.y - 16, w: 6, h: 40, wall: W.BRICK, wallColor: '#8a5040', roofColor: '#3f4a58', type: 'store' });
+  room(B3b, 'store', S3.x + 43, S3.y - 15, 4, 38, F.LINOLEUM);
+  const OPEN = WS.OPEN, BROKEN = WS.BROKEN, LOCKED = WS.LOCKED, CURT = WS.CURTAIN, BAR = (n) => n << WS.BARRICADE_SHIFT;
+  const STATES = [
+    [W.DOOR, 0, 'porta fechada'], [W.DOOR, OPEN, 'porta aberta'], [W.DOOR, BROKEN, 'porta arrombada'], [W.DOOR, LOCKED, 'trancada'],
+    [W.DOOR, BAR(1), 'barricada 1'], [W.DOOR, BAR(2), 'barricada 2'], [W.DOOR, BAR(3), 'barricada 3'], [W.DOOR, BAR(4), 'barricada 4'],
+    [W.WINDOW, 0, 'janela'], [W.WINDOW, OPEN, 'janela aberta'], [W.WINDOW, BROKEN, 'janela quebrada'], [W.WINDOW, CURT, 'cortina'],
+    [W.WINDOW, BAR(1), 'tábua 1'], [W.WINDOW, BAR(2), 'tábuas 2'], [W.WINDOW, BAR(3), 'tábuas 3'], [W.WINDOW, BAR(4), 'tábuas 4'],
+    [W.WINDOW, BROKEN | CURT, 'quebrada + cortina'],
+  ];
+  STATES.forEach(([wt, st, name], n) => {
+    const x = S3.x + 2 + n * 2;
+    if (x >= S3.x + 39) return;
+    // parede sul (eixo x) — face visível
+    m.wall[I(x, S3.y + 5)] = wt; m.wallState[I(x, S3.y + 5)] = st;
+    labels.push({ sec: 'doors', x: x + 0.5, y: S3.y + 6.1 + (n % 2) * 0.9, text: name });
+    // parede leste (eixo y) do outro prédio
+    const y = S3.y - 14 + n * 2;
+    if (y < S3.y + 23) { m.wall[I(S3.x + 47, y)] = wt; m.wallState[I(S3.x + 47, y)] = st; }
+  });
+  // vitrine e portão de garagem
+  const S3c = { x: S3.x, y: S3.y + 12 };
+  const B3c = building({ x: S3c.x, y: S3c.y, w: 20, h: 6, wall: W.BRICK, wallColor: '#9b7c62', roofColor: '#555b60', roofType: 'flat', type: 'store' });
+  room(B3c, 'store', S3c.x + 1, S3c.y + 1, 18, 4, F.LINOLEUM);
+  for (let k = 0; k < 4; k++) m.wall[I(S3c.x + 2 + k, S3c.y + 5)] = W.GLASS;
+  m.wallState[I(S3c.x + 4, S3c.y + 5)] = BROKEN;
+  for (let k = 0; k < 3; k++) { m.wall[I(S3c.x + 8 + k, S3c.y + 5)] = W.GARAGE_DOOR; }
+  for (let k = 0; k < 3; k++) { m.wall[I(S3c.x + 12 + k, S3c.y + 5)] = W.GARAGE_DOOR; m.wallState[I(S3c.x + 12 + k, S3c.y + 5)] = OPEN; }
+  for (let k = 0; k < 3; k++) { m.wall[I(S3c.x + 16 + k, S3c.y + 5)] = W.GARAGE_DOOR; m.wallState[I(S3c.x + 16 + k, S3c.y + 5)] = BROKEN; }
+  labels.push({ sec: 'doors2', x: S3c.x + 4, y: S3c.y + 6.8, text: 'vitrine (1 quebrada)' });
+  labels.push({ sec: 'doors2', x: S3c.x + 9.5, y: S3c.y + 6.8, text: 'garagem fechada' });
+  labels.push({ sec: 'doors2', x: S3c.x + 13.5, y: S3c.y + 6.8, text: 'aberta' });
+  labels.push({ sec: 'doors2', x: S3c.x + 17.5, y: S3c.y + 6.8, text: 'arrombada' });
+  // cercas
+  const S3f = { x: S3.x + 24, y: S3.y + 12 };
+  wallLine(S3f.x, S3f.y, S3f.x + 6, S3f.y, W.FENCE_WOOD); wallLine(S3f.x, S3f.y, S3f.x, S3f.y + 5, W.FENCE_WOOD);
+  m.wall[I(S3f.x + 3, S3f.y)] = W.FENCE_GATE; m.wallState[I(S3f.x + 3, S3f.y)] = 0;
+  m.wallState[I(S3f.x, S3f.y + 3)] = BROKEN;
+  wallLine(S3f.x + 8, S3f.y, S3f.x + 14, S3f.y, W.FENCE_METAL); wallLine(S3f.x + 14, S3f.y, S3f.x + 14, S3f.y + 5, W.FENCE_METAL);
+  m.wall[I(S3f.x + 11, S3f.y)] = W.FENCE_GATE; m.wallState[I(S3f.x + 11, S3f.y)] = OPEN;
+  m.wallState[I(S3f.x + 14, S3f.y + 3)] = BROKEN;
+  wallLine(S3f.x + 2, S3f.y + 8, S3f.x + 12, S3f.y + 8, W.HEDGE); wallLine(S3f.x + 12, S3f.y + 8, S3f.x + 12, S3f.y + 11, W.HEDGE);
+  m.wallState[I(S3f.x + 8, S3f.y + 8)] = BROKEN;
+  labels.push({ sec: 'fences', x: S3f.x + 3, y: S3f.y + 1.6, text: 'madeira (portão fechado, trecho quebrado)' });
+  labels.push({ sec: 'fences', x: S3f.x + 11, y: S3f.y + 1.6, text: 'tela (portão aberto)' });
+  labels.push({ sec: 'fences', x: S3f.x + 7, y: S3f.y + 9.8, text: 'sebe (trecho podado)' });
+
+  // ---- Seção 4: objetos (todos os tipos × 4 rotações) ----
+  const S4 = { x: 100, y: 6 };
+  const TYPES = ['bed', 'double_bed', 'sofa', 'armchair', 'table', 'chair', 'counter', 'kitchen_counter', 'fridge', 'stove', 'sink', 'toilet', 'bathtub', 'shower',
+    'wardrobe', 'dresser', 'bookshelf', 'tv', 'desk', 'shelf', 'cash_register', 'crate', 'trash_can', 'dumpster', 'car', 'pickup', 'police_car', 'ambulance',
+    'tree', 'pine', 'bush', 'rock', 'lamp_post', 'mailbox', 'bench', 'fuel_pump', 'washing_machine', 'workbench', 'barrel', 'log_pile', 'lamp', 'plant', 'rug',
+    'picnic_table', 'swing', 'grave', 'locker', 'gun_locker', 'medicine_cabinet', 'vending_machine', 'freezer', 'pallet', 'tire', 'grill', 'clothesline',
+    'watchtower', 'fountain', 'fence_gate'];
+  const COLS = 3, CELL = 11;
+  TYPES.forEach((t, n) => {
+    const cx = S4.x + (n % COLS) * CELL, cy = S4.y + ((n / COLS) | 0) * CELL;
+    fill(cx, cy, CELL - 1, CELL - 1, t === 'car' || t === 'pickup' || t === 'police_car' || t === 'ambulance' ? F.ASPHALT : ['tree', 'pine', 'bush', 'rock', 'grave', 'swing', 'watchtower', 'clothesline', 'fountain', 'picnic_table'].includes(t) ? F.GRASS : F.CONCRETE);
+    for (let r = 0; r < 4; r++) {
+      const x = cx + 1 + (r & 1) * 6, y = cy + 1 + (r >> 1) * 5;
+      obj(t, x, y, r, t === 'car' && r === 3 ? { wrecked: true } : null);
+    }
+    labels.push({ sec: 'obj', x: cx + 5, y: cy + 10.4, text: t });
+  });
+
+  // ---- Seção 5: telhados ----
+  const S5 = { x: 6, y: 110 };
+  const roofs = [
+    { x: S5.x, y: S5.y, w: 12, h: 9, roofType: 'gable', roofColor: '#6b3a32', wallColor: '#e4dcc5', wall: W.WOOD, name: 'duas águas (cumeeira x)' },
+    { x: S5.x + 16, y: S5.y, w: 9, h: 12, roofType: 'gable', roofColor: '#3f4a58', wallColor: '#9a5a45', wall: W.BRICK, name: 'duas águas (cumeeira y)' },
+    { x: S5.x + 30, y: S5.y, w: 12, h: 10, roofType: 'hip', roofColor: '#4a4a4f', wallColor: '#a9b79a', wall: W.WOOD, name: 'quatro águas' },
+    { x: S5.x, y: S5.y + 16, w: 9, h: 9, roofType: 'hip', roofColor: '#57534e', wallColor: '#d8d2c0', wall: W.PLASTER, name: 'pirâmide' },
+    { x: S5.x + 14, y: S5.y + 16, w: 16, h: 12, roofType: 'flat', roofColor: '#555b60', wallColor: '#7f6a5c', wall: W.BRICK, type: 'police', name: 'plano (comércio)' },
+  ];
+  for (const r of roofs) { const b = building(r); room(b, 'living', r.x + 1, r.y + 1, r.w - 2, r.h - 2, F.WOOD); labels.push({ sec: 'roofs', x: r.x + r.w / 2, y: r.y + r.h + 0.8, text: r.name }); }
+  // casa em L (2 partes) e celeiro
+  const L = building({ x: S5.x + 34, y: S5.y + 16, w: 12, h: 9, roofType: 'gable', roofColor: '#3e4f3e', wallColor: '#c6b7a0', wall: W.WOOD,
+    parts: [{ x: S5.x + 34, y: S5.y + 16, w: 12, h: 9, ridgeAxis: 'x' }, { x: S5.x + 34, y: S5.y + 24, w: 6, h: 6, ridgeAxis: 'y' }] });
+  room(L, 'living', S5.x + 35, S5.y + 17, 10, 7, F.WOOD);
+  labels.push({ sec: 'roofs', x: S5.x + 40, y: S5.y + 31, text: 'casa em L (2 partes)' });
+
+  // ---- Seção 6: chão com decals / cadáveres / itens ----
+  const S6 = { x: 60, y: 110 };
+  fill(S6.x, S6.y, 14, 10, F.ASPHALT); fill(S6.x, S6.y + 10, 14, 1, F.SIDEWALK);
+
+  // mapa pronto: máscaras de parede
+  G.world.setMap(m);
+  for (let y = 0; y < MH; y++) for (let x = 0; x < MW; x++) if (m.wall[I(x, y)]) G.world.updateWallMask(x, y);
+  for (let i = 0; i < MW * MH; i++) if (m.wall[i]) m.wallHp[i] = 50;
+
+  // ------------------------------------------------------------------
+  // Estado falso e render
+  // ------------------------------------------------------------------
+  const player = { x: 190, y: 190, dir: 0.8, alive: true, hp: 100, anim: { state: 'idle', t: 0 }, equipped: { main: null }, flashlightOn: false, inventory: { items: [] } };
+  const state = {
+    mode: 'paused', seed: 1, time: HOUR * 60, timeScale: 1, realTime: 3, light: 1,
+    weather: { rain: 0, fog: 0, wind: 0.25, cloud: 0, lightning: 0, storm: false, temperature: 24 },
+    power: true, water: true, map: m, player, zombies: [], corpses: [], groundItems: [], decals: [], particles: [], noises: [], fov: null, stats: {},
+  };
+  G.state = state;
+  const cv = document.createElement('canvas');
+  cv.width = 1200; cv.height = 680;
+  G.render.init(cv);
+  Object.assign(G.render.opts, { fov: false, overlays: false, post: false, weather: true, roofs: true, shadows: true });
+  G.camera.viewW = cv.width; G.camera.viewH = cv.height;
+
+  function shot(title, cx, cy, zoom, opts, lbl, w, h, prep) {
+    Object.assign(G.render.opts, { roofs: true }, opts || {});
+    if (w && h) { cv.width = w; cv.height = h; G.render.resize(w, h); G.camera.viewW = w; G.camera.viewH = h; }
+    else if (cv.width !== 1200) { cv.width = 1200; cv.height = 680; G.render.resize(1200, 680); G.camera.viewW = 1200; G.camera.viewH = 680; }
+    G.camera.x = cx; G.camera.y = cy; G.camera.zoom = zoom;
+    G.camera.update(0);
+    if (prep) prep();
+    for (let k = 0; k < 4; k++) G.render.draw(state, 0.3);
+    const c = document.createElement('canvas');
+    c.width = cv.width; c.height = cv.height;
+    const g = c.getContext('2d');
+    g.drawImage(cv, 0, 0);
+    // legendas
+    g.font = '12px Georgia, serif'; g.textAlign = 'center';
+    for (const l of labels) {
+      if (l.sec !== lbl) continue;
+      const p = G.iso.toScreen(l.x, l.y);
+      const tw = g.measureText(l.text).width;
+      g.fillStyle = 'rgba(10,12,11,0.72)'; g.fillRect(p.x - tw / 2 - 4, p.y - 11, tw + 8, 16);
+      g.fillStyle = '#e8e0c8'; g.fillText(l.text, p.x, p.y + 1);
+    }
+    const f = document.createElement('figure');
+    f.appendChild(c);
+    const cap = document.createElement('figcaption'); cap.textContent = title; f.appendChild(cap);
+    return f;
+  }
+  function section(title, note, figs) {
+    const h = document.createElement('h2'); h.textContent = title; out.appendChild(h);
+    if (note) { const p = document.createElement('p'); p.className = 'note'; p.textContent = note; out.appendChild(p); }
+    const row = document.createElement('div'); row.className = 'row';
+    for (const f of figs) row.appendChild(f);
+    out.appendChild(row);
+  }
+  const iso = (x, y) => [x, y];
+  void iso;
+
+  // ------------------------------------------------------------------
+  // Figuras: humanos e zumbis em 8 direções e várias poses
+  // ------------------------------------------------------------------
+  function figureSheet(kind) {
+    const RA = R.actors;
+    const poses = kind === 'human'
+      ? [['parado', { anim: 'idle' }], ['andando', { anim: 'walk', spd: 1.8, ph: 1.2 }], ['correndo', { anim: 'run', spd: 4.5, ph: 0.8, run: true }], ['furtivo', { anim: 'sneak', spd: 1, ph: 1, sneak: true }],
+        ['golpe (taco) 20%', { anim: 'attack', swing: 0.2, w: 'baseball_bat' }], ['golpe 45%', { anim: 'attack', swing: 0.45, w: 'baseball_bat' }], ['golpe 80%', { anim: 'attack', swing: 0.8, w: 'baseball_bat' }],
+        ['machado', { anim: 'attack', swing: 0.45, w: 'axe' }], ['facada', { anim: 'attack', swing: 0.3, w: 'kitchen_knife' }], ['mirando pistola', { anim: 'aim', aiming: true, w: 'pistol' }],
+        ['tiro (espingarda)', { anim: 'shoot', aiming: true, w: 'shotgun', t: 0.02 }], ['empurrão', { anim: 'shove', swing: 0.35 }], ['pulando janela', { anim: 'climb', t: 0.5 }],
+        ['machucado', { anim: 'hurt', t: 0.05 }], ['saqueando', { anim: 'loot' }], ['morto', { dead: true }]]
+      : [['parado', { st: 'idle' }], ['vagando', { st: 'wander', spd: 0.7, ph: 1.3 }], ['perseguindo', { st: 'chase', spd: 1.4, ph: 0.6 }], ['atacando', { st: 'attack' }],
+        ['batendo na porta', { st: 'bang' }], ['cambaleando', { st: 'stagger' }], ['comendo', { st: 'eat' }], ['caído', { st: 'down' }], ['rastejando', { st: 'crawl' }], ['morto', { st: 'dead' }]];
+    const cw = 96, ch = 96, cols = 8;
+    const c = document.createElement('canvas');
+    c.width = cw * cols + 120; c.height = ch * poses.length + 24;
+    const g = c.getContext('2d');
+    g.fillStyle = '#5a6a3c'; g.fillRect(0, 0, c.width, c.height);
+    g.font = '12px Georgia, serif';
+    for (let r = 0; r < poses.length; r++) {
+      const [name, o] = poses[r];
+      g.fillStyle = r & 1 ? 'rgba(0,0,0,0.06)' : 'rgba(255,255,255,0.03)'; g.fillRect(0, 20 + r * ch, c.width, ch);
+      g.fillStyle = '#f0ead8'; g.fillText(name, 6, 20 + r * ch + ch / 2 + 4);
+      for (let d = 0; d < cols; d++) {
+        const dir = d * Math.PI / 4;
+        const X = 120 + d * cw + cw / 2, Y = 20 + r * ch + ch - 16;
+        g.save();
+        const z = 1.35;
+        g.setTransform(z, 0, 0, z, X, Y);
+        g.fillStyle = 'rgba(0,0,0,0.25)'; g.beginPath(); g.ellipse(0, 0, 9, 4, 0, 0, 6.283); g.fill();
+        if (kind === 'human') {
+          const p = { id: 3, x: 0, y: 0, dir, alive: !o.dead, running: !!o.run, sneaking: !!o.sneak, aiming: !!o.aiming, anim: { state: o.anim, t: o.t != null ? o.t : o.swing || 0, swing: o.swing }, equipped: { main: o.w ? { type: o.w } : null }, flashlightOn: false };
+          RA.track(p, 0);
+          const a = RA.data(p); a.spd = o.spd || 0; a.phase = o.ph || 0; a.t = 1;
+          RA.drawPlayer(g, p, 0, state);
+        } else {
+          const zz = { id: 11 + r * 3 + d, x: 0, y: 0, dir, state: o.st, variant: { skin: (r + d) % 8, shirt: (r * 3 + d) % 14, pants: d % 8, hair: (r + 2 * d) % 9, hairStyle: d % 5, female: d % 3 === 0, blood: 0.3 + (d % 4) * 0.2 } };
+          RA.track(zz, 0);
+          const a = RA.data(zz); a.spd = o.spd || 0; a.phase = o.ph || 0; a.t = 1 + d * 0.3;
+          RA.drawZombie(g, zz, 0);
+        }
+        g.restore();
+      }
+    }
+    g.fillStyle = '#e8e0c8';
+    for (let d = 0; d < cols; d++) g.fillText(['leste', 'sudeste', 'sul', 'sudoeste', 'oeste', 'noroeste', 'norte', 'nordeste'][d] + ' (' + d * 45 + '°)', 120 + d * cw + 8, 14);
+    const f = document.createElement('figure');
+    f.appendChild(c);
+    const cap = document.createElement('figcaption');
+    cap.textContent = (kind === 'human' ? 'Humano (jogador)' : 'Zumbis (variantes)') + ' — 8 direções (dir no espaço do mundo) × poses';
+    f.appendChild(cap);
+    return f;
+  }
+
+  // ------------------------------------------------------------------
+  // Monta a página em etapas (dá tempo do navegador respirar)
+  // ------------------------------------------------------------------
+  const tasks = [
+    () => section('Pisos', 'Texturas procedurais por tipo com variação por tile, transições suaves (marching squares), meio-fio, margens, borda de piscina, píer e marcas de rua.',
+      [shot('pisos e transições', S1.x + 9, S1.y + 12, 0.95 * ZOOM, { roofs: false }, 'floors', 1200, 780)]),
+    () => section('Paredes finas', 'Segmentos finos ao longo do wallMask, com poste nas junções. Acabamento interno por cômodo (tinta, papel de parede, azulejo). Telhados desligados.',
+      [shot('materiais e junções (L/T/+)', S2.x + 14, S2.y + 12, 0.9 * ZOOM, { roofs: false }, 'walls', 1200, 760)]),
+    () => section('Portas e janelas — todos os estados', 'Parede sul (eixo x) com cada estado; ao fundo, parede leste (eixo y) do prédio de tijolo com a mesma sequência. Trancada não tem diferença visual.',
+      [shot('portas e janelas (eixo x)', S3.x + 18, S3.y + 5, 1.15 * ZOOM, { roofs: false }, 'doors', 1200, 520),
+        shot('parede no eixo y', S3.x + 47, S3.y + 4, 1.0 * ZOOM, { roofs: false }, 'none', 1200, 640),
+        shot('vitrine e portões de garagem', S3c.x + 11, S3c.y + 4, 1.0 * ZOOM, { roofs: false }, 'doors2', 1200, 460),
+        shot('cercas, portões e sebes', S3f.x + 7, S3f.y + 5, 1.1 * ZOOM, {}, 'fences', 1200, 560)]),
+    () => {
+      const figs = [];
+      for (let k = 0; k * 9 < TYPES.length; k++) {
+        const cx = S4.x + 1.5 * CELL, cy = S4.y + (k * 3 + 1.5) * CELL;
+        figs.push(shot('objetos ' + (k + 1) + ' (rot 0,1,2,3 em cada bloco)', cx, cy, 0.7 * ZOOM, { roofs: false }, 'obj', 1200, 820));
+      }
+      section('Objetos — todos os tipos em 4 rotações', 'rot = direção da frente (0:+x 1:+y 2:−x 3:−y). O 4º carro está batido (wrecked).', figs);
+    },
+    () => section('Telhados', 'Por building.parts com roofType (duas águas / quatro águas / plano), telhas, beiral, cumeeira, oitão, chaminé, platibanda e equipamentos.',
+      [shot('telhados', S5.x + 22, S5.y + 14, 0.7 * ZOOM, {}, 'roofs', 1200, 760)]),
+    () => {
+      // decals, cadáveres, itens e partículas
+      state.decals.push({ x: S6.x + 2, y: S6.y + 2, type: 'blood', size: 0.9, rot: 0.3, alpha: 0.9, t: state.time },
+        { x: S6.x + 4, y: S6.y + 3, type: 'bloodpool', size: 1.4, rot: 1, alpha: 0.9, t: state.time },
+        { x: S6.x + 6.5, y: S6.y + 2, type: 'glass', size: 0.9, rot: 0, alpha: 0.9, t: state.time },
+        { x: S6.x + 8, y: S6.y + 3, type: 'footprint', size: 0.5, rot: 0.8, alpha: 0.9, t: state.time },
+        { x: S6.x + 9, y: S6.y + 4, type: 'footprint', size: 0.5, rot: 0.8, alpha: 0.9, t: state.time },
+        { x: S6.x + 10.5, y: S6.y + 2, type: 'bullet', size: 0.4, rot: 0, alpha: 0.9, t: state.time });
+      state.corpses.push({ x: S6.x + 3, y: S6.y + 6.5, dir: 0.6, variant: { skin: 2, shirt: 5, pants: 1, hair: 3, blood: 0.8 }, time: state.time - 5 });
+      state.corpses.push({ x: S6.x + 8, y: S6.y + 7, dir: 2.4, variant: { skin: 4, shirt: 1, pants: 3, hair: 1, blood: 0.5 }, time: state.time - 5 });
+      if (G.items && G.items.create) state.groundItems.push({ x: S6.x + 11, y: S6.y + 6, item: G.items.create('baseball_bat') }, { x: S6.x + 11.6, y: S6.y + 6.8, item: G.items.create('canned_beans') }, { x: S6.x + 12, y: S6.y + 5.5, item: G.items.create('water_bottle') });
+      const pp = (type, n, col, sz) => { for (let k = 0; k < n; k++) state.particles.push({ x: S6.x + 6 + Math.random() * 2, y: S6.y + 6 + Math.random() * 2, z: 0.2 + Math.random() * 1.2, vx: 0, vy: 0, vz: 0, life: 5, maxLife: 5, type, color: col, size: sz }); };
+      pp('blood', 10, null, 3); pp('glass', 10, null, 2.5); pp('wood', 6, '#7a5a3a', 2); pp('dust', 4, null, 3); pp('smoke', 4, null, 3); pp('spark', 6, null, 1); pp('shell', 4, null, 1.5);
+      section('Chão: decals, cadáveres, itens, partículas', 'Sangue, poça, cacos de vidro, pegadas, marca de tiro; cadáveres com poça; itens no chão (ícone do módulo de itens); partículas congeladas.',
+        [shot('decals e cadáveres', S6.x + 7, S6.y + 5, 1.6 * ZOOM, {}, 'none', 1200, 560)]);
+    },
+    () => section('Figuras', 'Esqueleto 3D projetado em isométrico com rotação contínua; aqui nas 8 direções cardeais.', [figureSheet('human'), figureSheet('zombie')]),
+    () => {
+      // noite: janelas acesas, postes
+      state.time = 22 * 60;
+      state.decals.length = 0; state.corpses.length = 0; state.particles.length = 0;
+      obj('lamp_post', S5.x + 13, S5.y + 12, 1); obj('lamp_post', S5.x + 28, S5.y + 12, 1);
+      G.render.resetMap && G.render.resetMap();
+      section('Noite', 'Luz ambiente azulada, postes com energia, janelas acesas (cômodos sorteados por hora).',
+        [shot('noite: postes e janelas', S5.x + 22, S5.y + 14, 0.7 * ZOOM, {}, 'roofs', 1200, 760, () => {
+          G.render.draw(state, 0.3); // fixa a hora (a lista de cômodos acesos é sorteada por hora)
+          const rl = R.light.litRooms; rl.clear(); for (const r of m.rooms) if (r.id % 2) rl.add(r.id);
+          R.light.dirtyLights();
+        })]);
+    },
+  ];
+  let ti = 0;
+  function next() {
+    if (ti >= tasks.length) { status.textContent = 'pronto — ' + tasks.length + ' seções'; window.__galleryDone = true; return; }
+    try { tasks[ti](); } catch (e) { console.error('[galeria]', e); status.textContent = 'erro: ' + e.message; }
+    ti++;
+    status.textContent = 'gerando… ' + ti + '/' + tasks.length;
+    setTimeout(next, 10);
+  }
+  setTimeout(next, 30);
+})();
+</script>
+</body>
+</html>
