@@ -2,11 +2,15 @@
  * VALE QUIETO — render-actors.js  (Etapa 2: Render)
  * Humanos e zumbis procedurais: um pequeno esqueleto 3D (metros) em
  * coordenadas locais (f = frente, r = direita, z = altura), projetado em
- * isométrico com rotação contínua (qualquer direção), ordenação das partes
- * por profundidade, ciclos de caminhada/corrida/furtivo, poses de ataque
- * (golpe com arma, facada, empurrão), mira/tiro, pulo de janela, dor,
- * morte, zumbi trôpego, cambaleio, caído, rastejante, comendo, batendo.
- * Cadáveres com poça de sangue.
+ * isométrico, com ordenação das partes por profundidade, volume (tronco
+ * afunilado em dois tons, ombros/quadril, realce nos membros, contorno
+ * escuro), ciclos de caminhada/corrida/furtivo, respiração/balanço parado,
+ * poses de ataque (golpe com arma, facada, empurrão), mira/tiro, pulo de
+ * janela, dor, morte; zumbis tortos, arrastando um pé, roupa rasgada,
+ * cambaleio, caído, rastejante, comendo, batendo. Cadáveres com poça.
+ * Zumbis e cadáveres viram sprites em cache (aparência × estado × quadro ×
+ * 8 direções × escala), gerados com orçamento por quadro; o jogador é
+ * desenhado direto (animação contínua).
  * ===================================================================== */
 (function () {
   'use strict';
@@ -26,21 +30,18 @@
   const col = (v, pal, def) => (v == null ? def : typeof v === 'string' ? v : pal[((v | 0) % pal.length + pal.length) % pal.length]);
 
   function zombieLook(z) {
-    let lk = animData.get(z);
-    lk = lk && lk.look;
-    if (lk) return lk;
     const v = z.variant || {};
     const id = z.id != null ? z.id : 1;
     const h = (k) => R.hash(id, k, 911);
     const female = v.female != null ? !!v.female : h(1) < 0.45;
-    lk = {
+    const lk = {
       skin: R.hex(col(v.skin, Z_SKIN, Z_SKIN[(h(2) * Z_SKIN.length) | 0])),
       shirt: R.hex(col(v.shirt, CLOTH, CLOTH[(h(3) * CLOTH.length) | 0])),
       pants: R.hex(col(v.pants, PANTS, PANTS[(h(4) * PANTS.length) | 0])),
       hair: R.hex(col(v.hair, HAIR, HAIR[(h(5) * HAIR.length) | 0])),
       hairStyle: v.hairStyle != null ? v.hairStyle | 0 : female ? 2 + ((h(6) * 3) | 0) : (h(6) * 3) | 0,
       female,
-      blood: v.blood != null ? +v.blood : 0.2 + h(7) * 0.7,
+      blood: v.blood != null ? U.clamp(+v.blood || 0, 0, 1) : 0.2 + h(7) * 0.7,
       shoes: '#2a2622',
       zombie: true,
       torn: h(8),
@@ -69,21 +70,30 @@
       seed: 7,
     };
   }
-  RA.zombieLook = zombieLook;
-  RA.playerLook = playerLook;
+  // aparência com assinatura barata: refeita só quando algo muda (variant/look, sangue, mochila)
+  function lookOf(a, e, isPlayer) {
+    const v = isPlayer ? (e.look || e.variant || null) : (e.variant || null);
+    const blood = v && v.blood != null ? +v.blood || 0 : -1;
+    const back = isPlayer && e.equipped && e.equipped.back ? e.equipped.back : null;
+    if (!a.look || a.lookV !== v || a.lookB !== blood || a.lookBack !== back || a.lookId !== e.id) {
+      a.look = isPlayer ? playerLook(e) : zombieLook(e);
+      if (back) a.look.backpack = '#4a4a3a';
+      a.lookV = v; a.lookB = blood; a.lookBack = back; a.lookId = e.id;
+      a.lookN = (a.lookN || 0) + 1;
+    }
+    return a.look;
+  }
   // usados pela galeria (tools/gallery.html)
-  RA.makePose = (o) => makePose(o);
-  RA.lyingPose = (faceUp, t, kind, crawl, seed) => lyingPose(faceUp, t, kind, crawl, seed);
 
   // ------------------------------------------------------------------
   // Animação: fase da passada pelo deslocamento real (funciona com stubs)
   // ------------------------------------------------------------------
-  RA.track = function (e, dt, realT) {
+  RA.track = function (e, dt) {
     let a = animData.get(e);
-    if (!a) { a = { px: e.x, py: e.y, phase: R.hash(e.id || 3, 1, 5) * 6.28, spd: 0, t: 0, look: null, swayP: R.hash(e.id || 3, 2, 6) * 6.28, lastDir: e.dir || 0, turn: 0 }; animData.set(e, a); }
+    if (!a) { a = { px: e.x, py: e.y, phase: R.hash(e.id || 3, 1, 5) * 6.28, spd: 0, t: 0, look: null, lastDir: e.dir || 0 }; animData.set(e, a); }
     const dx = e.x - a.px, dy = e.y - a.py;
     let d = Math.sqrt(dx * dx + dy * dy);
-    if (d > 2) d = 0; // teleporte
+    if (!(d <= 2)) d = 0; // teleporte / NaN
     a.px = e.x; a.py = e.y;
     const sp = dt > 0 ? d / dt : 0;
     a.spd += (sp - a.spd) * Math.min(1, dt * 10);
@@ -121,7 +131,6 @@
     if (d && (d.cat === 'weapon' || d.weapon)) return d.weapon && d.weapon.blade ? 'machete' : 'pipe';
     return 'item';
   }
-  RA.weaponKind = weaponKind;
   const TWO_HANDED = { bat: 1, axe: 1, shovel: 1, golf: 1, plank: 1, sledge: 1, rifle: 1, shotgun: 1 };
   const WLEN = { bat: 0.86, axe: 0.8, hatchet: 0.38, knife: 0.26, machete: 0.58, crowbar: 0.66, hammer: 0.34, sledge: 0.9, shovel: 1.0, pan: 0.42, golf: 0.95, plank: 0.95, pipe: 0.78, wrench: 0.32, pistol: 0.2, rifle: 1.0, shotgun: 0.98, flashlight: 0.22, item: 0.18 };
 
@@ -137,7 +146,6 @@
     const a = (L1 * L1 - L2 * L2 + L * L) / (2 * L);
     const hh = Math.sqrt(Math.max(0, L1 * L1 - a * a));
     const mf = h[0] + df * a / d, mz = h[2] + dz * a / d, mr = h[1] + dr * a / d;
-    // perpendicular no plano (f,z): (dz, -df) normalizado
     let pf = dz / d, pz = -df / d;
     if (pf * bendF < 0) { pf = -pf; pz = -pz; }
     return [mf + pf * hh, mr, mz + pz * hh];
@@ -145,7 +153,7 @@
   const PI = Math.PI;
 
   function makePose(o) {
-    // o: { kind, state, phase, spd, t, run, sneak, weapon, swing, aimT, anim }
+    // o: { kind, state, phase, spd, t, run, sneak, weapon, swing, aiming, animT, anim, seed, female }
     const P = {};
     const t = o.t, ph = o.phase;
     let pelZ = 0.95, lean = 0, headTilt = 0, headF = 0, sway = 0;
@@ -155,31 +163,38 @@
     if (moving) {
       const sp = Math.min(1.6, o.spd / (zom ? 1.2 : 2.6));
       stride = o.run ? 0.42 : o.sneak ? 0.2 : zom ? 0.2 + 0.08 * sp : 0.26 + 0.1 * sp;
-      lift = o.run ? 0.2 : o.sneak ? 0.07 : zom ? 0.05 : 0.1;
+      lift = o.run ? 0.2 : o.sneak ? 0.07 : zom ? 0.06 : 0.1;
     }
     if (o.run) lean = 0.2;
     if (o.sneak) { pelZ = 0.72; lean = 0.42; }
-    if (zom) { lean = 0.16 + (o.state === 'chase' ? 0.12 : 0); headTilt = 0.08 + 0.05 * Math.sin(o.seed); sway = 0.05 * Math.sin(ph * 0.5); }
+    if (zom) {
+      // torto: inclinado, cabeça caída para um lado, balançando mesmo parado
+      lean = 0.18 + (o.state === 'chase' ? 0.12 : 0);
+      headTilt = 0.1 + 0.06 * Math.sin(o.seed);
+      sway = moving ? 0.05 * Math.sin(ph * 0.5) : 0.035 * Math.sin(t * 1.3 + o.seed);
+    }
     // passada
     const sL = Math.sin(ph), sR = Math.sin(ph + PI);
     const bob = moving ? Math.abs(Math.cos(ph)) * (o.run ? 0.05 : 0.025) : 0;
-    const breathe = Math.sin(t * 2.1) * 0.006;
+    const breathe = Math.sin(t * 2.1) * (moving ? 0.004 : 0.012);
     pelZ += bob - (moving ? 0.02 : 0);
     const pel = V(0, sway, pelZ);
-    // zumbi arrasta uma perna
-    const limp = zom ? 0.55 : 1;
     P.hipL = V(0, -0.1 + sway, pelZ - 0.03); P.hipR = V(0, 0.1 + sway, pelZ - 0.03);
     const stance = o.sneak ? 0.16 : 0.1;
     P.footL = V(stride * sL, -stance + sway * 0.3, 0.07 + Math.max(0, Math.cos(ph)) * lift);
-    P.footR = V(stride * sR * limp, stance + sway * 0.3, 0.07 + Math.max(0, Math.cos(ph + PI)) * lift * limp);
+    if (zom) {
+      // pé direito arrastado: quase não sai do chão e fica para trás, virado para dentro
+      P.footR = V(stride * sR * 0.45 - 0.08, stance + 0.03 + sway * 0.3, 0.05 + Math.max(0, Math.cos(ph + PI)) * lift * 0.2);
+    } else P.footR = V(stride * sR, stance + sway * 0.3, 0.07 + Math.max(0, Math.cos(ph + PI)) * lift);
     // tronco
     const chestZ = pelZ + 0.5 * Math.cos(lean) + breathe;
     const chestF = 0.5 * Math.sin(lean);
     P.pel = pel;
     P.chest = V(chestF, sway * 1.4, chestZ);
-    const shW = o.female ? 0.17 : 0.19;
-    P.shL = V(chestF, -shW + sway * 1.4, chestZ - 0.04); P.shR = V(chestF, shW + sway * 1.4, chestZ - 0.04);
-    P.head = V(chestF + 0.04 + headF + Math.sin(lean) * 0.12, sway * 1.5 + headTilt, chestZ + 0.2 - (zom ? 0.03 : 0));
+    const shW = o.female ? 0.17 : 0.2;
+    const shUp = zom ? 0 : breathe * 0.6;
+    P.shL = V(chestF, -shW + sway * 1.4, chestZ - 0.04 + shUp + (zom ? -0.04 : 0)); P.shR = V(chestF, shW + sway * 1.4, chestZ - 0.04 + shUp);
+    P.head = V(chestF + 0.04 + headF + Math.sin(lean) * 0.12, sway * 1.5 + headTilt, chestZ + 0.2 - (zom ? 0.04 : 0));
     // braços (padrão: balanço oposto às pernas)
     const armA = moving ? stride * (o.run ? 1.3 : 0.8) : 0;
     const handZ = pelZ - 0.1 + (o.run ? 0.2 : 0);
@@ -214,10 +229,10 @@
         elbowBendL = elbowBendR = 1;
         P.kneeDown = true;
       } else {
-        // trôpego: braços meio erguidos, um mais baixo
+        // trôpego: braços meio erguidos, um mais baixo e pendurado
         const k = Math.sin(t * 1.5 + o.seed) * 0.05;
         P.haL = V(chestF + 0.28 + (moving ? Math.sin(ph) * 0.06 : k), -0.16, chestZ - 0.34 + k);
-        P.haR = V(chestF + 0.12 + (moving ? -Math.sin(ph) * 0.05 : -k), 0.2, pelZ - 0.05);
+        P.haR = V(chestF + 0.08 + (moving ? -Math.sin(ph) * 0.05 : -k), 0.22, pelZ - 0.1);
         elbowBendL = 1;
       }
     } else {
@@ -239,7 +254,7 @@
         } else {
           // golpe horizontal: da direita-trás (preparação) para a esquerda-frente
           const ease = p < 0.25 ? -0.2 * (p / 0.25) : (p < 0.55 ? -0.2 + 1.2 * ((p - 0.25) / 0.3) : 1 - 0.3 * ((p - 0.55) / 0.45));
-          const ang = 1.9 - ease * 2.9; // radianos: 1.9 (lado direito, atrás) → -1.0 (esquerda, frente)
+          const ang = 1.9 - ease * 2.9; // 1.9 (lado direito, atrás) → -1.0 (esquerda, frente)
           const hr = 0.34, hz = chestZ - 0.14 + (w === 'axe' || w === 'sledge' ? 0.08 : 0);
           const hf = chestF + Math.cos(ang) * hr, hrr = Math.sin(ang) * hr;
           P.haR = V(hf, hrr, hz);
@@ -254,7 +269,6 @@
           P.haR = V(chestF + 0.12 - recoil * 0.06, 0.1, chestZ - 0.06 + recoil * 0.03);
           P.haL = V(chestF + 0.5 - recoil * 0.06, 0.02, chestZ - 0.04 + recoil * 0.05);
           P.weaponDir = [1, -0.04, recoil * 0.25];
-          P.weaponAt = 'R';
         } else if (w) {
           P.haR = V(chestF + 0.48 - recoil * 0.1, 0.05, chestZ - 0.05 + recoil * 0.08);
           P.haL = V(chestF + 0.44 - recoil * 0.1, -0.02, chestZ - 0.08 + recoil * 0.06);
@@ -290,7 +304,7 @@
         }
       } else if (w && w !== 'item') {
         // carregando a arma na mão
-        if (w === 'rifle' || w === 'shotgun') { P.haR = V(chestF + 0.05, 0.2, pelZ + 0.05); P.haL = V(chestF + 0.32, 0.02, pelZ + 0.18); P.weaponDir = [0.8, -0.2, 0.5]; P.weaponAt = 'R'; elbowBendL = 1; }
+        if (w === 'rifle' || w === 'shotgun') { P.haR = V(chestF + 0.05, 0.2, pelZ + 0.05); P.haL = V(chestF + 0.32, 0.02, pelZ + 0.18); P.weaponDir = [0.8, -0.2, 0.5]; elbowBendL = 1; }
         else if (two) { P.haR = V(chestF + 0.12, 0.16, pelZ - 0.02); P.haL = V(chestF + 0.12, 0.06, pelZ + 0.05); P.weaponDir = [0.55, 0.2, -0.8]; elbowBendL = elbowBendR = 1; }
         else P.weaponDir = [0.45, 0.1, -0.85];
       }
@@ -336,7 +350,7 @@
   // Desenho
   // ------------------------------------------------------------------
   const parts = [];
-  for (let i = 0; i < 24; i++) parts.push({ d: 0, fn: 0, a: null, b: null, c: null, w: 0, col: null });
+  for (let i = 0; i < 24; i++) parts.push({ d: 0, fn: 0, a: null, b: null, c: null, w: 0, col: null, hi: null });
   let np = 0;
   let cF0 = 1, cF1 = 0, cR0 = 0, cR1 = 1, ox = 0, oy = 0;
   function proj(p, out) {
@@ -344,58 +358,67 @@
     out[0] = ox + (wx - wy) * 32; out[1] = oy + (wx + wy) * 16 - p[2] * ZPX; out[2] = wx + wy + p[2] * 0.02;
     return out;
   }
-  const pa = [0, 0, 0], pb = [0, 0, 0], pc = [0, 0, 0];
+  const pa = [0, 0, 0], pb = [0, 0, 0], pc = [0, 0, 0], pd = [0, 0, 0];
   function depthOf(p) { return cF0 * p[0] + cR0 * p[1] + cF1 * p[0] + cR1 * p[1]; }
-  function addPart(fn, d, a, b, c, w, cl) {
+  function addPart(fn, d, a, b, c, w, cl, hi) {
     const q = parts[np++];
-    q.fn = fn; q.d = d; q.a = a; q.b = b; q.c = c; q.w = w; q.col = cl;
+    q.fn = fn; q.d = d; q.a = a; q.b = b; q.c = c; q.w = w; q.col = cl; q.hi = hi || null;
   }
-  function limb(ctx, a, b, w, cl) {
+  // membro com volume: traço base + realce fino do lado da luz (cima/esquerda)
+  function limb(ctx, a, b, w, cl, hi) {
     proj(a, pa); proj(b, pb);
     ctx.strokeStyle = cl; ctx.lineWidth = w;
     ctx.beginPath(); ctx.moveTo(pa[0], pa[1]); ctx.lineTo(pb[0], pb[1]); ctx.stroke();
+    if (hi && w > 3) {
+      ctx.strokeStyle = hi; ctx.lineWidth = w * 0.34;
+      const o = w * 0.22;
+      ctx.beginPath(); ctx.moveTo(pa[0] - o, pa[1] - o * 0.6); ctx.lineTo(pb[0] - o, pb[1] - o * 0.6); ctx.stroke();
+    }
   }
 
-  // Desenha um humanoide. ctx em px isométricos (câmera). opts: { alpha, look, kind, pose, dir, weapon, shadowOnly }
+  // Desenha um humanoide. ctx em px isométricos (câmera). opts: { weapon, solid, noOutline, muzzleOut }
   RA.drawFigure = function (ctx, x, y, dir, P, lk, opts) {
     if (opts.solid) return drawSolid(ctx, x, y, dir, P, lk, opts);
-    if (!opts.noOutline) drawSolid(ctx, x, y, dir, P, lk, { solid: 'rgba(22,18,16,0.5)', grow: 1.6 });
+    if (!opts.noOutline) drawSolid(ctx, x, y, dir, P, lk, { solid: 'rgba(20,16,14,0.55)', grow: 1.7 });
     const c = Math.cos(dir), s = Math.sin(dir);
     cF0 = c; cF1 = s; cR0 = -s; cR1 = c;
     ox = (x - y) * 32; oy = (x + y) * 16;
     np = 0;
-    const skin = R.css(lk.skin), skinD = R.css(lk.skin, 0.82);
+    const skin = R.css(lk.skin), skinD = R.css(lk.skin, 0.8), skinH = R.css(lk.skin, 1.14);
     const shirt = lk.shirt, pants = lk.pants;
     const farSide = (p) => depthOf(p) < depthOf(P.pel || P.chest) - 0.01;
-    // pernas
-    const legCol = (L) => R.css(pants, L ? 0.84 : 1);
+    // pernas (lado de trás mais escuro; realce no lado da luz)
+    const legCol = (far) => R.css(pants, far ? 0.78 : 1);
+    const legHi = (far) => (far ? null : R.css(pants, 1.28));
     const dl = (a, b) => (depthOf(a) + depthOf(b)) / 2;
-    addPart(1, dl(P.hipL, P.kneeL), P.hipL, P.kneeL, null, 6.0, legCol(farSide(P.hipL)));
-    addPart(1, dl(P.kneeL, P.footL), P.kneeL, P.footL, null, 5.0, legCol(farSide(P.hipL)));
-    addPart(1, dl(P.hipR, P.kneeR), P.hipR, P.kneeR, null, 6.0, legCol(farSide(P.hipR)));
-    addPart(1, dl(P.kneeR, P.footR), P.kneeR, P.footR, null, 5.0, legCol(farSide(P.hipR)));
+    const fL = farSide(P.hipL), fR = farSide(P.hipR);
+    addPart(1, dl(P.hipL, P.kneeL), P.hipL, P.kneeL, null, 6.2, legCol(fL), legHi(fL));
+    addPart(1, dl(P.kneeL, P.footL), P.kneeL, P.footL, null, 5.0, legCol(fL), legHi(fL));
+    addPart(1, dl(P.hipR, P.kneeR), P.hipR, P.kneeR, null, 6.2, legCol(fR), legHi(fR));
+    addPart(1, dl(P.kneeR, P.footR), P.kneeR, P.footR, null, 5.0, legCol(fR), legHi(fR));
     // pés (sapato apontando para a frente)
-    const toe = (f) => (P.lying ? [f[0] + (P.faceUp ? 0 : 0), f[1], f[2] + 0.12] : [f[0] + 0.14, f[1], f[2] - 0.02]);
+    const toe = (f) => (P.lying ? [f[0], f[1], f[2] + 0.12] : [f[0] + 0.14, f[1], f[2] - 0.02]);
     const shoeL = lk.oneShoe ? skinD : R.css(lk.shoes);
     addPart(1, depthOf(P.footL) + 0.02, P.footL, toe(P.footL), null, 4.6, shoeL);
     addPart(1, depthOf(P.footR) + 0.02, P.footR, toe(P.footR), null, 4.6, R.css(lk.shoes));
-    // tronco
+    // tronco e cabeça
     addPart(2, depthOf(P.chest) * 0.5 + depthOf(P.pel) * 0.5, null, null, null, 0, null);
-    // cabeça
     addPart(3, depthOf(P.head) + (P.lying ? 0 : 0.03), null, null, null, 0, null);
     // braços
-    const sleeve = (far) => R.css(shirt, far ? 0.8 : 0.95);
+    const sleeve = (far) => R.css(shirt, far ? 0.76 : 0.95);
+    const sleeveHi = (far) => (far ? null : R.css(shirt, 1.25));
     const armParts = (sh, el, ha, far) => {
       const d = (depthOf(sh) + depthOf(el) + depthOf(ha)) / 3;
-      addPart(1, d, sh, el, null, 4.5, sleeve(far));
-      addPart(1, d + 0.001, el, ha, null, 3.9, lk.longSleeve || lk.jacket ? sleeve(far) : far ? skinD : skin);
+      addPart(1, d, sh, el, null, 4.6, sleeve(far), sleeveHi(far));
+      const fore = lk.longSleeve || lk.jacket;
+      addPart(1, d + 0.001, el, ha, null, 3.9, fore ? sleeve(far) : far ? skinD : skin, fore ? sleeveHi(far) : far ? null : skinH);
       addPart(4, d + 0.002, ha, null, null, 1.9, far ? skinD : skin);
     };
     armParts(P.shL, P.elL, P.haL, farSide(P.shL));
     armParts(P.shR, P.elR, P.haR, farSide(P.shR));
     // arma
     if (opts.weapon && opts.weapon !== 'item' && !P.lying) {
-      const hand = P.weaponAt === 'R' ? P.haR : P.haR;
+      const hand = P.haR;
       const wd = P.weaponDir || [0.45, 0.1, -0.85];
       const l = Math.hypot(wd[0], wd[1], wd[2]) || 1;
       const L = WLEN[opts.weapon] || 0.5;
@@ -403,7 +426,7 @@
       const a = [hand[0] - wd[0] / l * back, hand[1] - wd[1] / l * back, hand[2] - wd[2] / l * back];
       const b = [hand[0] + wd[0] / l * (L - back), hand[1] + wd[1] / l * (L - back), hand[2] + wd[2] / l * (L - back)];
       addPart(5, (depthOf(a) + depthOf(b)) / 2 + 0.003, a, b, null, 0, opts.weapon);
-      if (P.muzzle) opts.muzzleOut && (opts.muzzleOut[0] = b[0], opts.muzzleOut[1] = b[1], opts.muzzleOut[2] = b[2]);
+      if (P.muzzle && opts.muzzleOut) { opts.muzzleOut[0] = b[0]; opts.muzzleOut[1] = b[1]; opts.muzzleOut[2] = b[2]; }
     }
     // ordena por profundidade (inserção)
     for (let i = 1; i < np; i++) {
@@ -415,65 +438,84 @@
     ctx.lineCap = 'round'; ctx.lineJoin = 'round';
     for (let i = 0; i < np; i++) {
       const q = parts[i];
-      if (q.fn === 1) limb(ctx, q.a, q.b, q.w, q.col);
+      if (q.fn === 1) limb(ctx, q.a, q.b, q.w, q.col, q.hi);
       else if (q.fn === 2) torso(ctx, P, lk);
-      else if (q.fn === 3) head(ctx, P, lk, dir);
+      else if (q.fn === 3) head(ctx, P, lk);
       else if (q.fn === 4) { proj(q.a, pa); ctx.fillStyle = q.col; ctx.beginPath(); ctx.arc(pa[0], pa[1], q.w, 0, 6.283); ctx.fill(); }
       else if (q.fn === 5) weapon(ctx, q.a, q.b, q.col);
     }
   };
-  // silhueta de cor única (para o mapa de luz): mesmas partes, sem detalhes
+  // silhueta de cor única (contorno e máscaras): mesmas partes, sem detalhes
   function drawSolid(ctx, x, y, dir, P, lk, opts) {
     const c = Math.cos(dir), s = Math.sin(dir);
     cF0 = c; cF1 = s; cR0 = -s; cR1 = c;
     ox = (x - y) * 32; oy = (x + y) * 16;
-    const col = opts.solid, gw = opts.grow || 1;
-    ctx.strokeStyle = col; ctx.fillStyle = col; ctx.lineCap = 'round'; ctx.lineJoin = 'round';
-    const L = (a, b, w) => { proj(a, pa); proj(b, pb); ctx.lineWidth = w + gw; ctx.beginPath(); ctx.moveTo(pa[0], pa[1]); ctx.lineTo(pb[0], pb[1]); ctx.stroke(); };
-    ctx.beginPath();
-    L(P.hipL, P.kneeL, 6); L(P.kneeL, P.footL, 5); L(P.hipR, P.kneeR, 6); L(P.kneeR, P.footR, 5);
+    const cl = opts.solid, gw = opts.grow || 1;
+    ctx.strokeStyle = cl; ctx.fillStyle = cl; ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+    // todas as linhas de mesma largura num só caminho (menos chamadas)
+    const seg = (a, b) => { proj(a, pa); proj(b, pb); ctx.moveTo(pa[0], pa[1]); ctx.lineTo(pb[0], pb[1]); };
     const toe = (f) => (P.lying ? [f[0], f[1], f[2] + 0.12] : [f[0] + 0.14, f[1], f[2] - 0.02]);
-    L(P.footL, toe(P.footL), 4.6); L(P.footR, toe(P.footR), 4.6);
-    L(P.shL, P.elL, 4.5); L(P.elL, P.haL, 3.9); L(P.shR, P.elR, 4.5); L(P.elR, P.haR, 3.9);
-    proj(P.shL, pa); proj(P.shR, pb);
-    const a0 = pa[0], a1 = pa[1], b0 = pb[0], b1 = pb[1];
-    proj([P.hipR[0], P.hipR[1] * 1.25, P.hipR[2] + 0.06], pc); const c0 = pc[0], c1 = pc[1];
-    proj([P.hipL[0], P.hipL[1] * 1.25, P.hipL[2] + 0.06], pc);
+    ctx.lineWidth = 6 + gw; ctx.beginPath(); seg(P.hipL, P.kneeL); seg(P.hipR, P.kneeR); ctx.stroke();
+    ctx.lineWidth = 5 + gw; ctx.beginPath(); seg(P.kneeL, P.footL); seg(P.kneeR, P.footR); seg(P.footL, toe(P.footL)); seg(P.footR, toe(P.footR)); ctx.stroke();
+    ctx.lineWidth = 4.5 + gw; ctx.beginPath(); seg(P.shL, P.elL); seg(P.shR, P.elR); seg(P.elL, P.haL); seg(P.elR, P.haR); ctx.stroke();
+    torsoQuad(P, lk);
     ctx.lineWidth = 5 + gw;
-    ctx.beginPath(); ctx.moveTo(a0, a1); ctx.lineTo(b0, b1); ctx.lineTo(c0, c1); ctx.lineTo(pc[0], pc[1]); ctx.closePath(); ctx.fill(); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(pa[0], pa[1]); ctx.lineTo(pb[0], pb[1]); ctx.lineTo(pc[0], pc[1]); ctx.lineTo(pd[0], pd[1]); ctx.closePath(); ctx.fill(); ctx.stroke();
     proj(P.head, pa);
     ctx.beginPath(); ctx.arc(pa[0], pa[1] - (P.lying ? 0 : 0.6), 4.3 + gw * 0.6 + (lk.hairStyle >= 3 ? 0.6 : 0), 0, 6.283); ctx.fill();
     if ((lk.hairStyle === 3 || lk.hairStyle === 4) && !P.lying) { ctx.beginPath(); ctx.ellipse(pa[0], pa[1] + 3, 4.3 + gw * 0.5, 6.5 + gw * 0.5, 0, 0, 6.283); ctx.fill(); }
     if (!P.lying) { proj(P.chest, pb); ctx.lineWidth = 3.5; ctx.beginPath(); ctx.moveTo(pb[0], pb[1]); ctx.lineTo(pa[0], pa[1]); ctx.stroke(); }
   }
-  function torso(ctx, P, lk) {
-    const hL = [P.hipL[0], P.hipL[1] * 1.25, P.hipL[2] + 0.06], hR = [P.hipR[0], P.hipR[1] * 1.25, P.hipR[2] + 0.06];
+  RA.drawSolid = (ctx, x, y, dir, P, lk, cl, grow) => drawSolid(ctx, x, y, dir, P, lk, { solid: cl, grow: grow || 1 });
+  // quad do tronco (ombros → quadril), afunilado: homens ombros largos, mulheres quadril largo
+  function torsoQuad(P, lk) {
+    const hipK = lk.female ? 1.45 : 1.2;
     proj(P.shL, pa); proj(P.shR, pb);
-    const a0 = pa[0], a1 = pa[1], b0 = pb[0], b1 = pb[1];
-    proj(hR, pc); const c0 = pc[0], c1 = pc[1];
-    proj(hL, pc); const d0 = pc[0], d1 = pc[1];
+    const hR = P.hipR, hL = P.hipL;
+    proj([hR[0], hR[1] * hipK, hR[2] + 0.06], pc);
+    proj([hL[0], hL[1] * hipK, hL[2] + 0.06], pd);
+  }
+  function torso(ctx, P, lk) {
+    torsoQuad(P, lk);
+    const a0 = pa[0], a1 = pa[1], b0 = pb[0], b1 = pb[1], c0 = pc[0], c1 = pc[1], d0 = pd[0], d1 = pd[1];
     const sh = lk.shirt;
-    // frente visível? (normal do peito · câmera)
     const facing = cF0 + cF1; // >0: frente para a câmera
     const base = R.css(sh, 0.92 + facing * 0.06);
     ctx.fillStyle = base; ctx.strokeStyle = base; ctx.lineWidth = 5;
     ctx.beginPath(); ctx.moveTo(a0, a1); ctx.lineTo(b0, b1); ctx.lineTo(c0, c1); ctx.lineTo(d0, d1); ctx.closePath();
     ctx.fill(); ctx.stroke();
+    // dois tons: metade da direita na tela (longe da luz) mais escura, com realce na borda esquerda
+    const rightIsB = b0 > a0;
+    const mx0 = (a0 + b0) / 2, my0 = (a1 + b1) / 2, mx1 = (c0 + d0) / 2, my1 = (c1 + d1) / 2;
+    const rs0 = rightIsB ? b0 : a0, rs1 = rightIsB ? b1 : a1, rh0 = rightIsB ? c0 : d0, rh1 = rightIsB ? c1 : d1;
+    ctx.fillStyle = R.css(sh, 0.74);
+    ctx.beginPath(); ctx.moveTo(mx0 + 0.6, my0); ctx.lineTo(rs0, rs1); ctx.lineTo(rh0, rh1); ctx.lineTo(mx1 + 0.6, my1); ctx.closePath(); ctx.fill();
+    const ls0 = rightIsB ? a0 : b0, ls1 = rightIsB ? a1 : b1, lh0 = rightIsB ? d0 : c0, lh1 = rightIsB ? d1 : c1;
+    ctx.strokeStyle = R.css(sh, 1.22); ctx.lineWidth = 1.3;
+    ctx.beginPath(); ctx.moveTo(ls0 + 1.2, ls1 + 1); ctx.lineTo(lh0 + 1.2, lh1 - 1); ctx.stroke();
     // cintura/cinto
     ctx.strokeStyle = R.css(lk.pants, 0.8); ctx.lineWidth = 3.6;
     ctx.beginPath(); ctx.moveTo(d0, d1 + 1); ctx.lineTo(c0, c1 + 1); ctx.stroke();
-    // detalhes: jaqueta aberta / gola / sangue / rasgos
-    const mx = (a0 + b0) / 2, my = (a1 + b1) / 2;
+    // detalhes: gola / jaqueta / mochila / sangue / rasgos
+    const mx = mx0, my = my0;
     if (facing > 0.2 && !P.lying) {
       ctx.strokeStyle = R.css(lk.skin, 0.95); ctx.lineWidth = 1.4;
       ctx.beginPath(); ctx.moveTo(mx - 1.4, my); ctx.lineTo(mx, my + 2.5); ctx.lineTo(mx + 1.4, my); ctx.stroke();
-      if (lk.jacket) { ctx.strokeStyle = R.css(sh, 0.62); ctx.lineWidth = 0.8; ctx.beginPath(); ctx.moveTo(mx, my + 2.5); ctx.lineTo((c0 + d0) / 2, (c1 + d1) / 2 - 1); ctx.stroke(); }
+      if (lk.jacket) { ctx.strokeStyle = R.css(sh, 0.62); ctx.lineWidth = 0.8; ctx.beginPath(); ctx.moveTo(mx, my + 2.5); ctx.lineTo(mx1, my1 - 1); ctx.stroke(); }
     }
     if (facing < -0.3 && lk.backpack && !P.lying) {
       ctx.fillStyle = lk.backpack; ctx.fillRect(mx - 4, my + 1, 8, 9); ctx.fillStyle = 'rgba(0,0,0,0.25)'; ctx.fillRect(mx - 4, my + 7, 8, 2);
     }
     if (lk.zombie) {
       const rng = U.rng(lk.seed * 7 + 1);
+      // barra da camisa rasgada (silhueta irregular abaixo da cintura)
+      if (!P.lying) {
+        ctx.fillStyle = R.css(sh, 0.85);
+        ctx.beginPath(); ctx.moveTo(d0, d1);
+        const n = 5;
+        for (let k = 1; k <= n; k++) { const t = k / n; const x = d0 + (c0 - d0) * t, y = d1 + (c1 - d1) * t; ctx.lineTo(x - (c0 - d0) / n * 0.5, y + 2 + rng() * 3.5 * lk.torn); ctx.lineTo(x, y); }
+        ctx.closePath(); ctx.fill();
+      }
       // rasgos (pele aparecendo) e sangue
       if (lk.torn > 0.4) { ctx.fillStyle = R.css(lk.skin, 0.9); ctx.beginPath(); const tx = d0 + (c0 - d0) * 0.3, ty = d1 + (c1 - d1) * 0.3 - 4; ctx.moveTo(tx, ty); ctx.lineTo(tx + 3, ty - 3); ctx.lineTo(tx + 4, ty + 1); ctx.lineTo(tx + 1, ty + 2); ctx.closePath(); ctx.fill(); }
       const nb = Math.round(lk.blood * 6);
@@ -488,12 +530,12 @@
       ctx.fillStyle = 'rgba(110,22,18,' + Math.min(0.8, lk.blood) + ')'; ctx.beginPath(); ctx.ellipse(mx + 2, my + 5, 2.5, 3, 0, 0, 6.283); ctx.fill();
     }
   }
-  function head(ctx, P, lk, dir) {
+  function head(ctx, P, lk) {
     proj(P.head, pa);
     const hx = pa[0], hy = pa[1];
     const r = lk.female ? 4.1 : 4.3;
     // pescoço
-    if (!P.lying) { proj(P.chest, pb); ctx.strokeStyle = R.css(lk.skin, 0.85); ctx.lineWidth = 2.6; ctx.beginPath(); ctx.moveTo(pb[0], pb[1]); ctx.lineTo(hx, hy + 2); ctx.stroke(); }
+    if (!P.lying) { proj(P.chest, pb); ctx.strokeStyle = R.css(lk.skin, 0.8); ctx.lineWidth = 2.6; ctx.beginPath(); ctx.moveTo(pb[0], pb[1]); ctx.lineTo(hx, hy + 2); ctx.stroke(); }
     // direção do rosto em tela
     const fx = (cF0 - cF1) * 32, fy = (cF0 + cF1) * 16;
     const fl = Math.hypot(fx, fy) || 1;
@@ -507,18 +549,17 @@
       ctx.fillStyle = R.css(hairC, 0.8);
       ctx.beginPath(); ctx.ellipse(hx - ux * 1.5, hy + 3, r * 0.95, r * 1.6, 0, 0, 6.283); ctx.fill();
     }
-    // cabeça
-    const g = ctx.createRadialGradient(hx + ux * 1.2 - 1, hy - 1.5, 0.5, hx, hy, r * 1.1);
-    g.addColorStop(0, R.css(lk.skin, 1.12)); g.addColorStop(1, R.css(lk.skin, 0.8));
-    ctx.fillStyle = g;
+    // cabeça (dois tons: luz de cima/esquerda)
+    ctx.fillStyle = R.css(lk.skin, 0.84);
     ctx.beginPath(); ctx.arc(hx, hy, r, 0, 6.283); ctx.fill();
+    ctx.fillStyle = R.css(lk.skin, 1.06);
+    ctx.beginPath(); ctx.arc(hx - 0.8, hy - 0.8, r * 0.78, 0, 6.283); ctx.fill();
     // cabelo: calota deslocada para trás e para cima
     if (!bald) {
       ctx.fillStyle = R.css(hairC);
       const bx = hx - ux * (facing > 0 ? 1.4 : 0.6), by = hy - uy * 0.8 - (P.lying ? 0 : 1.3);
       ctx.beginPath();
       if (facing > 0.15) {
-        // de frente: franja em cima
         ctx.ellipse(bx, by - 0.6, r * 1.02, r * 0.78, 0, Math.PI * 0.92, Math.PI * 2.08);
         ctx.closePath(); ctx.fill();
         if (style === 2 || style === 3) { ctx.fillRect(hx - r * 1.02, hy - 1.5, 1.6, r + 1); ctx.fillRect(hx + r * 1.02 - 1.6, hy - 1.5, 1.6, r + 1); }
@@ -526,6 +567,7 @@
         ctx.arc(bx, by + 0.6, r * 1.02, 0, 6.283); ctx.fill();
       }
       if (style === 4 && !P.lying) { ctx.beginPath(); ctx.arc(hx - ux * 4.2, hy - 1.2, 1.8, 0, 6.283); ctx.fill(); }
+      ctx.fillStyle = R.css(hairC, 1.35, 0.5); ctx.fillRect(bx - 2.2, by - r * 0.55, 2.4, 1);
     }
     // olhos (quando de frente)
     if (facing > 0.1 && !P.lying) {
@@ -549,7 +591,7 @@
       case 'bat': seg(0, 0.35, 1.8, '#7a5a3a'); seg(0.3, 1, 3.2, '#b48c5a'); seg(0.5, 1, 1, 'rgba(255,240,210,0.35)'); break;
       case 'plank': seg(0, 1, 3.4, '#8a6a44'); break;
       case 'pipe': seg(0, 1, 2.2, '#8a8e90'); seg(0.1, 1, 0.8, 'rgba(255,255,255,0.35)'); break;
-      case 'crowbar': seg(0, 0.92, 2, '#3a3d40'); { const q = lerp(1); ctx.strokeStyle = '#3a3d40'; ctx.lineWidth = 2; ctx.beginPath(); ctx.moveTo(lerp(0.92)[0], lerp(0.92)[1]); ctx.lineTo(q[0] + nx * 3, q[1] + ny * 3); ctx.stroke(); } break;
+      case 'crowbar': seg(0, 0.92, 2, '#3a3d40'); { const q = lerp(1), q2 = lerp(0.92); ctx.strokeStyle = '#3a3d40'; ctx.lineWidth = 2; ctx.beginPath(); ctx.moveTo(q2[0], q2[1]); ctx.lineTo(q[0] + nx * 3, q[1] + ny * 3); ctx.stroke(); } break;
       case 'golf': seg(0, 1, 1.2, '#a8acae'); { const q = lerp(1); ctx.fillStyle = '#6a6e70'; ctx.fillRect(q[0] - 2, q[1] - 1, 4, 2.4); } break;
       case 'knife': seg(0, 0.35, 2, '#2a2420'); seg(0.35, 1, 1.6, '#d8dcde'); break;
       case 'machete': seg(0, 0.25, 2.2, '#2a2420'); seg(0.25, 1, 2.6, '#c0c4c6'); break;
@@ -569,22 +611,21 @@
   // Entidades do jogo
   // ------------------------------------------------------------------
   const muzzle = [0, 0, 0];
-  RA.muzzle = muzzle;
-  // Jogador
-  RA.drawPlayer = function (ctx, p, dt, s) {
+  // Jogador (direto, animação contínua). Guarda RA.last = { P, lk, dir } para a máscara de luz.
+  RA.drawPlayer = function (ctx, p, dt) {
     const a = RA.track(p, dt);
-    const lk = a.look || (a.look = playerLook(p));
-    if (p.equipped && p.equipped.back && !lk.backpack) lk.backpack = '#4a4a3a';
+    const lk = lookOf(a, p, true);
     const an = p.anim || {};
     const w = p.equipped && p.equipped.main ? weaponKind(p.equipped.main) : null;
     if (p.alive === false || an.state === 'dead' || an.state === 'sleep' || p.sleeping) {
       const P = lyingPose(an.state === 'sleep' || p.sleeping ? true : R.hash(3, 3, 3) < 0.5, a.t, 'dead', false, 3);
       RA.drawFigure(ctx, p.x, p.y, p.dir || 0, P, lk, { weapon: null });
       RA.last = { P, lk, dir: p.dir || 0 };
+      RA.muzzleWorld = null;
       return;
     }
     // swing: anim.swing (0..1) ou anim.t quando <= 1
-    let swing = an.swing != null ? an.swing : an.t != null && an.t <= 1 ? an.t : 0;
+    const swing = an.swing != null ? an.swing : an.t != null && an.t <= 1 ? an.t : 0;
     const P = makePose({
       kind: 'human', state: an.state, anim: an.state, phase: a.phase, spd: a.spd, t: a.t, run: p.running && a.spd > 0.3, sneak: p.sneaking,
       weapon: w, swing, aiming: p.aiming, animT: an.t || 0, female: lk.female, seed: 1,
@@ -594,32 +635,84 @@
     RA.last = { P, lk, dir: p.dir || 0 };
     if (muzzle[2] > 0) { // converte ponta da arma para mundo (x,y,z)
       const c = Math.cos(p.dir || 0), sn = Math.sin(p.dir || 0);
-      const wx = c * muzzle[0] - sn * muzzle[1], wy = sn * muzzle[0] + c * muzzle[1];
-      RA.muzzleWorld = [p.x + wx, p.y + wy, muzzle[2]];
+      RA.muzzleWorld = [p.x + c * muzzle[0] - sn * muzzle[1], p.y + sn * muzzle[0] + c * muzzle[1], muzzle[2]];
     } else RA.muzzleWorld = null;
   };
-  // Zumbi
+  // pose de um zumbi com tempo/fase dados (a cache usa valores quantizados)
+  function zombiePose(z, st, lk, phase, spd, t) {
+    if (st === 'dead') return lyingPose(true, t, 'dead', false, z.id || 1);
+    if (st === 'down') return lyingPose(R.hash(z.id || 1, 9, 9) < 0.6, t, 'down', false, z.id || 1);
+    if (st === 'crawl' || z.crawler) return lyingPose(false, t + (z.animT || 0), 'crawl', true, z.id || 1);
+    return makePose({ kind: 'zombie', state: st, phase, spd, t, female: lk.female, seed: (z.id || 1) * 1.7 });
+  }
+  // Zumbi desenhado direto (galeria / sem orçamento)
   RA.drawZombie = function (ctx, z, dt) {
     const a = RA.track(z, dt);
-    const lk = a.look || (a.look = zombieLook(z));
-    const st = z.state || 'idle';
-    let P;
-    if (st === 'dead') P = lyingPose(true, a.t, 'dead', false, z.id || 1);
-    else if (st === 'down') P = lyingPose(R.hash(z.id || 1, 9, 9) < 0.6, a.t, 'down', false, z.id || 1);
-    else if (st === 'crawl' || z.crawler) P = lyingPose(false, a.t + (z.animT || 0), 'crawl', true, z.id || 1);
-    else P = makePose({ kind: 'zombie', state: st, phase: a.phase, spd: a.spd, t: a.t, female: lk.female, seed: (z.id || 1) * 1.7 });
+    const lk = lookOf(a, z, false);
+    const P = zombiePose(z, z.state || 'idle', lk, a.phase, a.spd, a.t);
     RA.drawFigure(ctx, z.x, z.y, z.dir || 0, P, lk, {});
     RA.last = { P, lk, dir: z.dir || 0 };
   };
-  // Cadáver: poça de sangue crescente + corpo deitado
+  // ---- sprites em cache (zumbis e cadáveres) ----
+  const SPR_W = 100, SPR_H = 108, SPR_AX = 50, SPR_AY = 90; // âncora = pés
+  const zCaches = { 0.5: new R.Cache(900), 1: new R.Cache(900), 2: new R.Cache(360) };
+  RA.budget = 1e9;
+  const T_STATES = { attack: 1, bang: 1, stagger: 1, eat: 1, lunge: 1, down: 1, crawl: 1 };
+  // Sprite do zumbi para este quadro (null = sem orçamento → desenhar direto). Avança a animação.
+  RA.zombieSprite = function (z, dt) {
+    const a = RA.track(z, dt);
+    const lk = lookOf(a, z, false);
+    const S = R.S;
+    const st = z.state || 'idle';
+    const moving = a.spd > 0.25 && st !== 'dead' && st !== 'down' && !(st === 'crawl' || z.crawler) && st !== 'eat';
+    // quantização: 8 direções; 12 quadros por passada; 8 quadros/s nas animações por tempo
+    const d8 = ((Math.round((z.dir || 0) / (PI / 4)) % 8) + 8) % 8;
+    let ph = 0, tq = 0, fr = 0;
+    if (st === 'dead') fr = 0;
+    else if (T_STATES[st] || st === 'crawl' || z.crawler) { fr = ((a.t * 8) | 0) % 32; tq = fr / 8; ph = moving ? (((a.phase / (2 * PI)) * 12) | 0) % 12 / 12 * 2 * PI : 0; }
+    else if (moving) { fr = 100 + ((((a.phase / (2 * PI)) * 12) | 0) % 12 + 12) % 12; ph = (fr - 100) / 12 * 2 * PI; tq = 0; }
+    else { fr = 200 + ((a.t * 2) | 0) % 8; tq = (fr - 200) / 2; }
+    const spdQ = moving ? (a.spd > 0.9 ? 1.1 : 0.6) : 0;
+    const key = (z.id != null ? z.id : 'n') + '|' + a.lookN + '|' + st + (z.crawler ? 'c' : '') + '|' + fr + '|' + (moving && T_STATES[st] ? ((ph * 2) | 0) : '') + '|' + spdQ + '|' + d8;
+    const cache = zCaches[S];
+    let spr = cache.get(key);
+    if (spr) return spr;
+    if (RA.budget <= 0) return null;
+    const t0 = performance.now();
+    const c = R.canvas(SPR_W * S, SPR_H * S), g = c.getContext('2d', { willReadFrequently: true });
+    g.setTransform(S, 0, 0, S, SPR_AX * S, SPR_AY * S);
+    const dir = d8 * PI / 4;
+    const P = zombiePose(z, st, lk, ph, spdQ, tq);
+    RA.drawFigure(g, 0, 0, dir, P, lk, {});
+    spr = { c, ax: SPR_AX, ay: SPR_AY, w: SPR_W, h: SPR_H };
+    cache.set(key, spr);
+    RA.budget -= performance.now() - t0;
+    return spr;
+  };
+  // Cadáver: corpo em sprite (cache por cadáver) + poça de sangue crescente desenhada ao vivo
+  const corpseInfo = new WeakMap();
   RA.drawCorpse = function (ctx, c, s) {
-    const lk = c._look || (c._look = c.variant ? zombieLook({ id: c.id || ((c.x * 97 + c.y * 13) | 0), variant: c.variant }) : zombieLook({ id: ((c.x * 97 + c.y * 13) | 0) }));
+    let ci = corpseInfo.get(c);
+    if (!ci) {
+      const seed = ((c.x * 131 + c.y * 71) | 0);
+      const id = c.id != null ? c.id : ((c.x * 97 + c.y * 13) | 0);
+      ci = { seed, lk: zombieLook({ id, variant: c.variant }), spr: null, S: 0 };
+      corpseInfo.set(c, ci);
+    }
     const age = s ? Math.max(0, s.time - (c.time || 0)) : 60;
     const grow = Math.min(1, 0.35 + age / 6);
-    const seed = (c.x * 131 + c.y * 71) | 0;
-    RA.bloodPool(ctx, c.x - Math.cos(c.dir || 0) * 0.3, c.y - Math.sin(c.dir || 0) * 0.3, 0.55 * grow, seed);
-    const P = lyingPose(R.hash(seed, 2, 2) < 0.65, 0, 'dead', false, seed);
-    RA.drawFigure(ctx, c.x, c.y, c.dir || 0, P, lk, {});
+    const dir = c.dir || 0;
+    RA.bloodPool(ctx, c.x - Math.cos(dir) * 0.3, c.y - Math.sin(dir) * 0.3, 0.55 * grow, ci.seed);
+    const S = R.S;
+    if (!ci.spr || ci.S !== S || ci.dir !== dir) {
+      const cv = R.canvas(SPR_W * S, SPR_H * S), g = cv.getContext('2d', { willReadFrequently: true });
+      g.setTransform(S, 0, 0, S, SPR_AX * S, SPR_AY * S);
+      const P = lyingPose(R.hash(ci.seed, 2, 2) < 0.65, 0, 'dead', false, ci.seed);
+      RA.drawFigure(g, 0, 0, dir, P, ci.lk, {});
+      ci.spr = cv; ci.S = S; ci.dir = dir;
+    }
+    const X = (c.x - c.y) * 32, Y = (c.x + c.y) * 16;
+    ctx.drawImage(ci.spr, X - SPR_AX, Y - SPR_AY, SPR_W, SPR_H);
   };
   RA.bloodPool = function (ctx, x, y, r, seed) {
     const cx = (x - y) * 32, cy = (x + y) * 16;

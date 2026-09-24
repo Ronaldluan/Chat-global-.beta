@@ -206,7 +206,7 @@
     'tree', 'pine', 'bush', 'rock', 'lamp_post', 'mailbox', 'bench', 'fuel_pump', 'washing_machine', 'workbench', 'barrel', 'log_pile', 'lamp', 'plant', 'rug',
     'picnic_table', 'swing', 'grave', 'locker', 'gun_locker', 'medicine_cabinet', 'vending_machine', 'freezer', 'pallet', 'tire', 'grill', 'clothesline',
     'watchtower', 'fountain', 'fence_gate'];
-  const COLS = 3, CELL = 11;
+  const COLS = 4, CELL = 11; // 4 colunas: todas as linhas cabem no mapa 200×200
   TYPES.forEach((t, n) => {
     const cx = S4.x + (n % COLS) * CELL, cy = S4.y + ((n / COLS) | 0) * CELL;
     fill(cx, cy, CELL - 1, CELL - 1, t === 'car' || t === 'pickup' || t === 'police_car' || t === 'ambulance' ? F.ASPHALT : ['tree', 'pine', 'bush', 'rock', 'grave', 'swing', 'watchtower', 'clothesline', 'fountain', 'picnic_table'].includes(t) ? F.GRASS : F.CONCRETE);
@@ -255,7 +255,7 @@
   const cv = document.createElement('canvas');
   cv.width = 1200; cv.height = 680;
   G.render.init(cv);
-  Object.assign(G.render.opts, { fov: false, overlays: false, post: false, weather: true, roofs: true, shadows: true });
+  Object.assign(G.render.opts, { fov: false, overlays: false, post: false, weather: true, roofs: true, shadows: true, sync: true });
   G.camera.viewW = cv.width; G.camera.viewH = cv.height;
 
   function shot(title, cx, cy, zoom, opts, lbl, w, h, prep) {
@@ -291,8 +291,6 @@
     for (const f of figs) row.appendChild(f);
     out.appendChild(row);
   }
-  const iso = (x, y) => [x, y];
-  void iso;
 
   // ------------------------------------------------------------------
   // Figuras: humanos e zumbis em 8 direções e várias poses
@@ -363,9 +361,9 @@
         shot('cercas, portões e sebes', S3f.x + 7, S3f.y + 5, 1.1 * ZOOM, {}, 'fences', 1200, 560)]),
     () => {
       const figs = [];
-      for (let k = 0; k * 9 < TYPES.length; k++) {
-        const cx = S4.x + 1.5 * CELL, cy = S4.y + (k * 3 + 1.5) * CELL;
-        figs.push(shot('objetos ' + (k + 1) + ' (rot 0,1,2,3 em cada bloco)', cx, cy, 0.7 * ZOOM, { roofs: false }, 'obj', 1200, 820));
+      for (let k = 0; k * 12 < TYPES.length; k++) {
+        const cx = S4.x + 2 * CELL, cy = S4.y + (k * 3 + 1.5) * CELL;
+        figs.push(shot('objetos ' + (k + 1) + ' (rot 0,1,2,3 em cada bloco)', cx, cy, 0.62 * ZOOM, { roofs: false }, 'obj', 1200, 820));
       }
       section('Objetos — todos os tipos em 4 rotações', 'rot = direção da frente (0:+x 1:+y 2:−x 3:−y). O 4º carro está batido (wrecked).', figs);
     },

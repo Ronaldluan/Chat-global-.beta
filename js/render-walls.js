@@ -15,10 +15,15 @@
   const HM = R.WALL_M;          // altura da parede (m)
   const CUT_M = 0.36;           // altura da parede recortada (m)
   const T2 = 0.075;             // meia espessura da parede (tiles)
-  RW.T2 = T2; RW.HM = HM; RW.CUT_M = CUT_M;
+  RW.T2 = T2; RW.CUT_M = CUT_M;
   let S = 1, map = null;
-  const sprites = new Map();
-  let spriteCount = 0;
+  // sprites por escala (LRU real); trocar de zoom não descarta nada
+  const caches = { 0.5: new R.Cache(900), 1: new R.Cache(900), 2: new R.Cache(420) };
+  const roofCaches = { 0.5: new R.Cache(90), 1: new R.Cache(90), 2: new R.Cache(40) };
+  RW.budget = 1e9;      // ms por quadro para gerar sprites de parede
+  RW.hardCap = 6;       // além do orçamento, só gera sem substituto até este excesso (ms)
+  RW.stats = { gen: 0, ms: 0, roofGen: 0, roofMs: 0 };
+  RW.roofBudget = 1e9;  // ms por quadro para gerar sprites de telhado
   let staticKey = null;   // chave estática por tile (acabamentos)
   let finOf = null;       // Int16Array(n*5): acabamento por meia-parede (N,E,S,W,poste)
 
@@ -77,14 +82,15 @@
 
   RW.reset = function (m) {
     map = m;
-    sprites.clear(); spriteCount = 0;
+    for (const k in caches) caches[k].clear();
+    for (const k in roofCaches) roofCaches[k].clear();
     const n = m.w * m.h;
     finOf = new Int16Array(n * 5);
     staticKey = new Array(n);
     for (let i = 0; i < n; i++) if (m.wall[i]) RW.updateTile(i);
     buildRoofs();
   };
-  RW.setScale = function (s) { if (s !== S) { S = s; sprites.clear(); spriteCount = 0; } };
+  RW.setScale = function (s) { S = s; };
 
   // tile vizinho ao longo do eixo tem a mesma estrutura (portões de garagem, vitrines)
   function sameAlong(i, axis, dir, type) {
@@ -120,6 +126,7 @@
     return ext;
   }
 
+  const AC_TYPES = { house: 1, motel: 1, trailer: 1, office: 1, diner: 1 };
   RW.updateTile = function (i) {
     const m = map, wv = m.wall[i];
     if (!wv) { staticKey[i] = null; return; }
@@ -138,14 +145,22 @@
         const q = R.ground.qsrc;
         const ext = !m.building[q(i, 3)] || !m.building[q(i, 0)];
         const hc = R.hash(b ? b.id : x, ext ? 1 : y, wv === W.DOOR ? 88 : 89);
-        staticKey[i] = (wv === W.DOOR ? 'D' : 'N') + axisOf(i) + mk + '|' + f + '|' + (ext ? 'e' : 'i') + ((hc * 6) | 0) + '|' + ((R.hash(m.room[q(i, 3)] || m.room[q(i, 0)] || x, 7, 3) * 8) | 0);
+        // extras na face visível (sul/leste) quando ela dá para fora: luminária sobre a porta, ar-condicionado na janela
+        const visOut = !m.building[q(i, 3)];
+        let extra = '';
+        if (visOut && wv === W.DOOR) { const en = R.ground.entry(i); if (en && en.lamp && (en.ox > 0 || en.oy > 0)) extra = '|L'; }
+        if (visOut && wv === W.WINDOW && b && AC_TYPES[b.type] && R.hash(x, y, 95) < 0.12) extra = '|A';
+        staticKey[i] = (wv === W.DOOR ? 'D' : 'N') + axisOf(i) + mk + '|' + f + '|' + (ext ? 'e' : 'i') + ((hc * 6) | 0) + '|' + ((R.hash(m.room[q(i, 3)] || m.room[q(i, 0)] || x, 7, 3) * 8) | 0) + extra;
       } else if (wv === W.GARAGE_DOOR || wv === W.GLASS) {
         const ax = axisOf(i);
         const a = sameAlong(i, ax, -1, wv) ? 1 : 0, bb = sameAlong(i, ax, 1, wv) ? 1 : 0;
         const b = m.building[i] ? m.buildings[m.building[i] - 1] : null;
         staticKey[i] = (wv === W.GARAGE_DOOR ? 'G' : 'V') + ax + mk + '|' + f + '|' + a + bb + '|' + ((R.hash(b ? b.id : 0, 2, 9) * 4) | 0);
       } else {
-        staticKey[i] = 'W' + mk + '|' + f;
+        // variação de desgaste (escorridos, manchas) só em faces externas
+        let ext = false;
+        for (let k = 0; k < 5; k++) if (finExt(finOf[i * 5 + k])) ext = true;
+        staticKey[i] = 'W' + mk + '|' + f + '|w' + (ext ? 1 + ((R.hash(x, y, 64) * 3) | 0) : 0);
       }
     } else if (isFence(wv)) {
       const v = (R.hash(x, y, 51) * 4) | 0;
@@ -164,6 +179,7 @@
   // ------------------------------------------------------------------
   // Pintura das faces (coordenadas da face: u ao longo, z para cima, metros)
   // ------------------------------------------------------------------
+  let wearV = 0; // variante de desgaste do sprite em construção
   function paintFinish(g, f, u0, u1, z0, z1, exterior) {
     const c = f.col;
     g.fillStyle = R.css(c); g.fillRect(u0, z0, u1 - u0, z1 - z0);
@@ -250,6 +266,25 @@
       }
       default: break; // paint
     }
+    // desgaste por variante (escorridos do beiral, manchas, tinta descascada / eflorescência)
+    if (exterior && wearV) {
+      const wr = U.rng(wearV * 7919 + FIN.indexOf(f) * 31);
+      const ns = 1 + ((wr() * 3) | 0);
+      for (let k = 0; k < ns; k++) {
+        const u = wr(), w = 0.03 + wr() * 0.08, len = 0.5 + wr() * 1.3;
+        if (u + w < u0 || u > u1) continue;
+        const gr = g.createLinearGradient(0, HM, 0, HM - len);
+        gr.addColorStop(0, 'rgba(48,42,34,0.26)'); gr.addColorStop(1, 'rgba(48,42,34,0)');
+        g.fillStyle = gr; g.fillRect(u, HM - len, w, len);
+      }
+      const nb = (wr() * 3) | 0;
+      for (let k = 0; k < nb; k++) {
+        const u = wr() * 0.9, z = 0.3 + wr() * 1.6, bw = 0.06 + wr() * 0.16, bh = 0.04 + wr() * 0.12;
+        if (u + bw < u0 || u > u1) continue;
+        g.fillStyle = f.kind === 'brick' ? 'rgba(220,214,200,0.22)' : f.kind === 'siding' || f.kind === 'stucco' ? R.css(c, 1.18, 0.55) : 'rgba(40,36,30,0.14)';
+        g.fillRect(u, z, bw, bh);
+      }
+    }
     // base/rodapé e sujeira
     if (exterior) {
       if (z0 < 0.16) { g.fillStyle = 'rgba(95,92,86,1)'; g.fillRect(u0, 0, u1 - u0, 0.16); g.fillStyle = 'rgba(0,0,0,0.25)'; g.fillRect(u0, 0.16, u1 - u0, 0.02); }
@@ -321,7 +356,7 @@
   const TOPCAP = '#39342f', TOPCAP_CUT = '#2c2824';
   function newSprite(L, Rr, TOP, B) {
     const w = L + Rr, h = TOP + 32 + B;
-    const c = R.canvas(w * S, h * S), g = c.getContext('2d');
+    const c = R.canvas(w * S, h * S), g = c.getContext('2d', { willReadFrequently: true });
     g.setTransform(S, 0, 0, S, L * S, TOP * S);
     g.lineJoin = 'round';
     return { c, g, L, TOP, w, h };
@@ -419,7 +454,6 @@
     g.strokeRect(s0 + w * 0.16, z0 + h * 0.1, w * 0.68, h * 0.36);
     g.strokeStyle = R.css(col, 1.2); g.lineWidth = 0.01;
     g.strokeRect(s0 + w * 0.16 + 0.015, z0 + h * 0.56 - 0.015, w * 0.68, h * 0.34);
-    if (ext && col[0] + col[1] + col[2] < 500 && false) { /* janela na porta: desativado */ }
     g.fillStyle = '#c9b060';
     const kx = knobLeft ? s0 + w * 0.12 : s1 - w * 0.12;
     g.beginPath(); g.arc(kx, z0 + 1.0, 0.035, 0, 6.283); g.fill();
@@ -473,6 +507,14 @@
         g.fillRect(o0 - 0.06, 0, 0.06, zTop + 0.06); g.fillRect(o1, 0, 0.06, zTop + 0.06); g.fillRect(o0 - 0.06, zTop, o1 - o0 + 0.12, 0.06);
         g.restore();
       }
+      if (!cut && key.endsWith('|L')) { // arandela ao lado da porta, na divisa do tile (acesa à noite: halo em render.js)
+        g.save(); planeT(g, axis, hi + 0.006);
+        g.fillStyle = '#23211f'; g.fillRect(-0.05, 1.56, 0.1, 0.3);
+        g.fillStyle = '#eadfb8'; g.fillRect(-0.035, 1.6, 0.07, 0.18);
+        g.fillStyle = 'rgba(255,255,255,0.55)'; g.fillRect(-0.025, 1.68, 0.02, 0.07);
+        g.fillStyle = '#1a1816'; g.fillRect(-0.06, 1.84, 0.12, 0.035); g.fillRect(-0.045, 1.53, 0.09, 0.035);
+        g.restore();
+      }
       abox(g, axis, o1, 1.014, lo, hi, 0, cutH, fb, (mk & (axis === 'x' ? 2 : 4)) ? null : fb, top, exB);
       if (open && !broken) {
         const z1 = zc(zTop), L = o1 - o0;
@@ -510,6 +552,15 @@
         abox(g, axis, o0 - 0.07, o1 + 0.07, hi, hi + 0.06, zS - 0.06, zS, '#d8d3c8', '#ece8de', '#f2eee6', false);
       }
       abox(g, axis, o1, 1.014, lo, hi, 0, cutH, fb, (mk & (axis === 'x' ? 2 : 4)) ? null : fb, top, exB);
+      if (!cut && !broken && !open && !bar && key.endsWith('|A')) { // ar-condicionado de janela
+        const acF = (gg, u0, u1, zz0, zz1) => {
+          gg.fillStyle = '#b8bab6'; gg.fillRect(u0, zz0, u1 - u0, zz1 - zz0);
+          gg.fillStyle = 'rgba(40,44,46,0.55)';
+          for (let z = zz0 + 0.06; z < zz1 - 0.04; z += 0.05) gg.fillRect(u0 + 0.04, z, (u1 - u0) * 0.55, 0.02);
+          gg.fillStyle = 'rgba(90,70,50,0.35)'; gg.fillRect(u0, zz0, u1 - u0, 0.03);
+        };
+        abox(g, axis, 0.28, 0.72, hi, hi + 0.3, zS + 0.02, zS + 0.34, acF, '#a6a8a4', '#c8cac6', false);
+      }
       if (!cut && bar) planks(g, axis, o0, o1, zS - 0.05, zT + 0.05, bar, hi + 0.08);
     } else if (wv === W.GLASS) {
       const parts = key.split('|');
@@ -705,29 +756,37 @@
     const st = m.wallState[i];
     const fence = isFence(wv);
     const key = sk + '|' + st + '|' + (fence ? 0 : cut ? 1 : 0) + (lit ? 'L' : '');
-    let spr = sprites.get(key);
+    const cache = caches[S];
+    let spr = cache.get(key);
     if (spr) return spr;
+    // orçamento esgotado: usa o mesmo sprite em outra escala (esticado) se houver
+    if (RW.budget <= 0) {
+      for (const k in caches) { if (+k === S) continue; const alt = caches[k].peek(key); if (alt) return alt; }
+      if (RW.budget < -RW.hardCap) return null; // teto rígido: o resto aparece nos próximos quadros
+    }
+    const t0 = performance.now();
     const mk = m.wallMask[i];
     const openDoor = (wv === W.DOOR || wv === W.FENCE_GATE) && (st & WS.OPEN);
     const hPx = fence ? 64 : (cut ? CUT_M : HM) * ZPX + 6;
     spr = newSprite(openDoor ? 60 : 48, openDoor ? 60 : 48, Math.ceil(hPx) + 4, openDoor ? 34 : 18);
     const g = spr.g;
     const cutH = cut ? CUT_M : HM;
+    const wi = sk.indexOf('|w');
+    wearV = wi >= 0 ? +sk.slice(wi + 2) || 0 : 0;
     if (isStruct(wv)) drawPlainWall(g, i, mk, cutH);
     else if (isOpening(wv)) drawOpeningTile(g, i, wv, st, axisOf(i), cutH, lit);
     else if (wv === W.FENCE_WOOD) woodFence(g, mk, +sk.split('|')[1] || 0, +sk.split('|')[2] || 0, !!(st & WS.BROKEN), i);
     else if (wv === W.FENCE_METAL) metalFence(g, mk, +sk.split('|')[2] || 0, !!(st & WS.BROKEN), i);
     else if (wv === W.HEDGE) hedge(g, mk, +sk.split('|')[1] || 0, +sk.split('|')[2] || 0, !!(st & WS.BROKEN), i);
     else if (wv === W.FENCE_GATE) fenceGate(g, i, st, axisOf(i), +sk.split('|')[1] || 0);
+    wearV = 0;
     delete spr.g;
-    sprites.set(key, spr);
-    if (++spriteCount > (S > 1 ? 380 : 900)) {
-      let n = 120;
-      for (const k of sprites.keys()) { sprites.delete(k); spriteCount--; if (--n <= 0) break; }
-    }
+    cache.set(key, spr);
+    const dtg = performance.now() - t0;
+    RW.budget -= dtg; RW.stats.gen++; RW.stats.ms += dtg;
     return spr;
   };
-  RW.spriteCount = () => sprites.size;
+  RW.spriteCount = () => caches[S].size;
   RW.axisOf = axisOf;
   RW.isStruct = isStruct;
   RW.isOpening = isOpening;
@@ -808,7 +867,23 @@
           units.push({ x: ux, y: uy, w: 1.1, h: 0.8, z: zS, hgt: 0.6, kind: 'ac' });
         }
         units.push({ x: x0 + 0.8 + R.hash(b.id, 9, 34) * (x1 - x0 - 1.6), y: y0 + 0.8 + R.hash(b.id, 9, 35) * (y1 - y0 - 1.6), w: 0.3, h: 0.3, z: zS, hgt: 0.5, kind: 'vent' });
+        // duto saindo do primeiro equipamento até a borda
+        const u0 = units[0];
+        if (R.hash(b.id, 4, 36) < 0.7) {
+          if (R.hash(b.id, 5, 37) < 0.5) units.push({ x: x0 + ins + 0.05, y: u0.y + 0.25, w: Math.max(0.3, u0.x - x0 - ins - 0.05), h: 0.3, z: zS, hgt: 0.3, kind: 'duct' });
+          else units.push({ x: u0.x + 0.4, y: y0 + ins + 0.05, w: 0.3, h: Math.max(0.3, u0.y - y0 - ins - 0.05), z: zS, hgt: 0.3, kind: 'duct' });
+        }
       }
+      // claraboias
+      if (p.w >= 5 && p.h >= 5 && R.hash(b.id, p.y, 38) < 0.65) {
+        const n = 1 + ((R.hash(b.id, 6, 39) * (p.w * p.h > 60 ? 3 : 1.6)) | 0);
+        for (let k = 0; k < n; k++) {
+          const sx = x0 + 1 + R.hash(b.id, k, 40) * (x1 - x0 - 2.6), sy = y0 + 1 + R.hash(b.id, k, 41) * (y1 - y0 - 2.4);
+          if (units.some((u) => sx < u.x + u.w + 0.2 && sx + 1.2 > u.x - 0.2 && sy < u.y + u.h + 0.2 && sy + 0.9 > u.y - 0.2)) continue;
+          units.push({ x: sx, y: sy, w: 1.2, h: 0.9, z: zS, hgt: 0.16, kind: 'sky' });
+        }
+      }
+      units.sort((a, c) => (a.x + a.w + a.y + a.h) - (c.x + c.w + c.y + c.h));
       finishFaces(faces, x0, y0, x1, y1);
       const hullPts = [];
       for (const f of faces) for (const q of f.pts) { const s = P3(q[0], q[1], q[2]); hullPts.push(s[0], s[1]); }
@@ -940,6 +1015,38 @@
     for (let k = 2; k < scr.length; k += 2) ctx.lineTo(scr[k], scr[k + 1]);
     ctx.closePath();
   }
+  // Sprite do telhado inteiro de um prédio (cache por escala). null = orçamento esgotado.
+  RW.roofSprite = function (rf) {
+    const cache = roofCaches[S];
+    let spr = cache.get(rf.b.id);
+    if (spr) return spr;
+    if (RW.roofBudget <= 0) {
+      for (const k in roofCaches) { if (+k === S) continue; const alt = roofCaches[k].peek(rf.b.id); if (alt) return alt; }
+      return null;
+    }
+    const t0 = performance.now();
+    if (rf.x0 == null) boundsOf(rf);
+    const pad = 4;
+    const x0 = Math.floor(rf.x0) - pad, y0 = Math.floor(rf.y0) - pad, w = Math.ceil(rf.x1) + pad - x0, h = Math.ceil(rf.y1) + pad - y0;
+    const c = R.canvas(w * S, h * S), g = c.getContext('2d', { willReadFrequently: true });
+    g.setTransform(S, 0, 0, S, -x0 * S, -y0 * S);
+    g.lineJoin = 'round';
+    RW.drawRoof(g, rf, 1);
+    spr = { c, x: x0, y: y0, w, h };
+    cache.set(rf.b.id, spr);
+    const dtg = performance.now() - t0;
+    RW.roofBudget -= dtg; RW.stats.roofGen++; RW.stats.roofMs += dtg;
+    return spr;
+  };
+  // retângulo (px isométricos) do contorno do telhado
+  function boundsOf(rf) {
+    const h = rf.hull;
+    let x0 = 1e9, x1 = -1e9, y0 = 1e9, y1 = -1e9;
+    for (let k = 0; k < h.length; k += 2) { if (h[k] < x0) x0 = h[k]; if (h[k] > x1) x1 = h[k]; if (h[k + 1] < y0) y0 = h[k + 1]; if (h[k + 1] > y1) y1 = h[k + 1]; }
+    rf.x0 = x0; rf.x1 = x1; rf.y0 = y0; rf.y1 = y1;
+  }
+  RW.roofBounds = function (rf) { if (rf.x0 == null) boundsOf(rf); return rf; };
+
   // Desenha o telhado de um prédio (ctx já com a câmera: px isométricos)
   RW.drawRoof = function (ctx, rf, alpha) {
     if (alpha <= 0.01) return;
@@ -967,10 +1074,12 @@
           ctx.fillStyle = pat;
           ctx.fill();
           ctx.strokeStyle = R.css(rf.col, f.bright * 0.55, 0.8); ctx.lineWidth = 0.8; ctx.stroke();
+          roofWear(ctx, rf, f, a, E, [sx / l, sy / l, sz / l], rf.metal ? 'metal' : 'shingle');
         } else if (f.kind === 'flat') {
           const pat = roofPattern(ctx, [88, 88, 86], f.bright, 'flat');
           setPatternFrame(pat, f.pts[0], [1, 0, 0], [0, 1, 0]);
           ctx.fillStyle = pat; ctx.fill();
+          roofWear(ctx, rf, f, f.pts[0], [1, 0, 0], [0, 1, 0], 'flat');
         } else if (f.kind === 'rim') {
           ctx.fillStyle = R.css(R.mix(wallCol, [120, 120, 118], 0.5), f.bright); ctx.fill();
         } else if (f.kind === 'innerN' || f.kind === 'innerW') {
@@ -993,6 +1102,22 @@
           ctx.fillStyle = R.css(R.mix(rf.col, [230, 226, 216], 0.55), f.bright * 0.9); ctx.fill();
         }
       }
+      // calhas nos beirais voltados para a câmera
+      if (!rf.metal && part.type !== 'flat') {
+        for (const f of faces) {
+          if (f.kind !== 'slope' || !f.vis || !(f.n[0] > 0.3 || f.n[1] > 0.3)) continue;
+          const q0 = f.pts[0], q1 = f.pts[1];
+          const ox = f.n[0] > 0.3 ? 0.04 : 0, oy = f.n[1] > 0.3 ? 0.04 : 0;
+          const A = P3(q0[0] + ox, q0[1] + oy, q0[2] - 0.12), B = P3(q1[0] + ox, q1[1] + oy, q1[2] - 0.12);
+          ctx.lineCap = 'butt';
+          ctx.strokeStyle = 'rgba(40,40,40,0.35)'; ctx.lineWidth = 3.2;
+          ctx.beginPath(); ctx.moveTo(A[0], A[1] + 1); ctx.lineTo(B[0], B[1] + 1); ctx.stroke();
+          ctx.strokeStyle = R.css([196, 194, 186], f.bright * 0.95); ctx.lineWidth = 2.4;
+          ctx.beginPath(); ctx.moveTo(A[0], A[1]); ctx.lineTo(B[0], B[1]); ctx.stroke();
+          ctx.strokeStyle = 'rgba(255,255,255,0.35)'; ctx.lineWidth = 0.7;
+          ctx.beginPath(); ctx.moveTo(A[0], A[1] - 0.8); ctx.lineTo(B[0], B[1] - 0.8); ctx.stroke();
+        }
+      }
       // cumeeira e espigões
       if (faces.ridge) {
         const a = P3(...faces.ridge[0]), c = P3(...faces.ridge[1]);
@@ -1008,10 +1133,77 @@
         ctx.stroke();
       }
       if (part.chimney) drawBox(ctx, part.chimney, '#8a4e3c', true);
-      if (part.units) for (const u of part.units) drawBox(ctx, { x: u.x, y: u.y, w: u.w, h: u.h, z0: u.z, z1: u.z + u.hgt }, u.kind === 'ac' ? '#9ea3a4' : '#6d7072', false, u.kind);
+      if (part.units) for (const u of part.units) drawBox(ctx, { x: u.x, y: u.y, w: u.w, h: u.h, z0: u.z, z1: u.z + u.hgt }, u.kind === 'ac' ? '#9ea3a4' : u.kind === 'sky' ? '#b8b6ae' : u.kind === 'duct' ? '#8f9496' : '#6d7072', false, u.kind);
     }
     ctx.globalAlpha = 1;
   };
+  // Desgaste do telhado no quadro da face (u ao longo do beiral, v subindo; metros):
+  // telhas trocadas, manchas/musgo junto ao beiral, escorridos e sujeira na borda
+  function roofWear(ctx, rf, f, a, E, Sd, kind) {
+    const e = P3(E[0], E[1], E[2]), sv = P3(Sd[0], Sd[1], Sd[2]), o = P3(a[0], a[1], a[2]);
+    let umin = 1e9, umax = -1e9, vmax = 0;
+    for (const q of f.pts) {
+      const dx = q[0] - a[0], dy = q[1] - a[1], dz = q[2] - a[2];
+      const u = dx * E[0] + dy * E[1] + dz * E[2], v = dx * Sd[0] + dy * Sd[1] + dz * Sd[2];
+      if (u < umin) umin = u; if (u > umax) umax = u; if (v > vmax) vmax = v;
+    }
+    const W = umax - umin;
+    if (W < 0.2 || vmax < 0.2) return;
+    ctx.save();
+    fillPoly(ctx, f.scr); ctx.clip();
+    ctx.transform(e[0], e[1], sv[0], sv[1], o[0], o[1]);
+    const rng = U.rng(rf.b.id * 131 + ((a[0] * 7 + a[1] * 13) | 0));
+    const br = f.bright;
+    if (kind === 'shingle') {
+      const n = (W * vmax * 0.35) | 0;
+      for (let k = 0; k < n; k++) {
+        const row = Math.floor(rng() * vmax / 0.25), off = row & 1 ? 0.1667 : 0;
+        const u = Math.floor((umin + rng() * W - off) / 0.3333) * 0.3333 + off;
+        ctx.fillStyle = R.css(R.jitter(rf.col, 0.55, rng()), br * (0.78 + rng() * 0.4));
+        ctx.fillRect(u + 0.02, row * 0.25 + 0.03, 0.3, 0.22);
+      }
+      // musgo/liquens em manchas (mais perto do beiral)
+      const nm = 2 + ((rng() * 4) | 0);
+      for (let k = 0; k < nm; k++) {
+        const u = umin + rng() * W, v = rng() * rng() * vmax * 0.8, r = 0.2 + rng() * 0.5;
+        ctx.fillStyle = 'rgba(' + (70 + (rng() * 30 | 0)) + ',' + (88 + (rng() * 20 | 0)) + ',52,' + (0.12 + rng() * 0.12).toFixed(2) + ')';
+        ctx.beginPath(); ctx.ellipse(u, v, r, r * 0.5, 0, 0, 6.283); ctx.fill();
+      }
+    } else if (kind === 'metal') {
+      // ferrugem em faixas verticais
+      const n = 3 + ((rng() * 5) | 0);
+      for (let k = 0; k < n; k++) {
+        const u = umin + rng() * W, len = 0.4 + rng() * vmax * 0.7;
+        const gr = ctx.createLinearGradient(0, 0, 0, len);
+        gr.addColorStop(0, 'rgba(120,64,30,0.32)'); gr.addColorStop(1, 'rgba(120,64,30,0)');
+        ctx.fillStyle = gr; ctx.fillRect(u, 0, 0.1 + rng() * 0.3, len);
+      }
+    } else {
+      // laje: manchas de água parada e remendos de manta
+      const n = 2 + ((rng() * 4) | 0);
+      for (let k = 0; k < n; k++) {
+        const u = umin + rng() * W, v = rng() * vmax, r = 0.4 + rng() * 1.2;
+        ctx.fillStyle = 'rgba(40,40,38,' + (0.06 + rng() * 0.08).toFixed(2) + ')';
+        ctx.beginPath(); ctx.ellipse(u, v, r, r * (0.5 + rng() * 0.4), rng() * 3, 0, 6.283); ctx.fill();
+      }
+      const np = (rng() * 3) | 0;
+      for (let k = 0; k < np; k++) { ctx.fillStyle = R.css([78, 78, 76], br * (0.95 + rng() * 0.15), 0.35); ctx.fillRect(umin + rng() * (W - 1), rng() * (vmax - 1), 0.6 + rng() * 1.2, 0.5 + rng() * 0.8); }
+    }
+    if (kind !== 'flat') {
+      // escorridos a partir do topo e sujeira no beiral
+      const ns = 2 + ((rng() * 4) | 0);
+      for (let k = 0; k < ns; k++) {
+        const u = umin + rng() * W, len = vmax * (0.3 + rng() * 0.6);
+        const gr = ctx.createLinearGradient(0, vmax, 0, vmax - len);
+        gr.addColorStop(0, 'rgba(20,18,14,0.16)'); gr.addColorStop(1, 'rgba(20,18,14,0)');
+        ctx.fillStyle = gr; ctx.fillRect(u, vmax - len, 0.08 + rng() * 0.2, len);
+      }
+      const gr = ctx.createLinearGradient(0, 0, 0, 0.7);
+      gr.addColorStop(0, 'rgba(20,18,14,0.24)'); gr.addColorStop(1, 'rgba(20,18,14,0)');
+      ctx.fillStyle = gr; ctx.fillRect(umin, 0, W, 0.7);
+    }
+    ctx.restore();
+  }
   function drawBox(ctx, bx, col, brick, kind) {
     const c = R.hex(col);
     const x0 = bx.x, x1 = bx.x + bx.w, y0 = bx.y, y1 = bx.y + bx.h, z0 = bx.z0, z1 = bx.z1;
@@ -1022,7 +1214,7 @@
     };
     quad([[x0, y1, z0], [x1, y1, z0], [x1, y1, z1], [x0, y1, z1]], 0.78);
     quad([[x1, y0, z0], [x1, y1, z0], [x1, y1, z1], [x1, y0, z1]], 0.94);
-    quad([[x0, y0, z1], [x1, y0, z1], [x1, y1, z1], [x0, y1, z1]], kind === 'ac' ? 1.05 : 0.5);
+    quad([[x0, y0, z1], [x1, y0, z1], [x1, y1, z1], [x0, y1, z1]], kind === 'ac' || kind === 'duct' ? 1.05 : kind === 'sky' ? 0.95 : 0.5);
     if (brick) {
       ctx.strokeStyle = 'rgba(40,20,14,0.35)'; ctx.lineWidth = 0.6;
       ctx.beginPath();
@@ -1030,6 +1222,21 @@
       ctx.stroke();
       const t = P3(x0 + 0.1, y0 + 0.1, z1), t2 = P3(x1 - 0.1, y1 - 0.1, z1);
       ctx.fillStyle = '#231c18'; ctx.beginPath(); ctx.ellipse((t[0] + t2[0]) / 2, (t[1] + t2[1]) / 2, 5, 2.5, 0, 0, 6.283); ctx.fill();
+    }
+    if (kind === 'sky') { // vidro da claraboia com reflexo
+      const a = P3(x0 + 0.1, y0 + 0.1, z1 + 0.01), b2 = P3(x1 - 0.1, y0 + 0.1, z1 + 0.01), c2 = P3(x1 - 0.1, y1 - 0.1, z1 + 0.01), d2 = P3(x0 + 0.1, y1 - 0.1, z1 + 0.01);
+      const gr = ctx.createLinearGradient(a[0], a[1], c2[0], c2[1]);
+      gr.addColorStop(0, '#9fb8c4'); gr.addColorStop(0.5, '#56707e'); gr.addColorStop(1, '#3a4c58');
+      ctx.fillStyle = gr; ctx.beginPath(); ctx.moveTo(a[0], a[1]); ctx.lineTo(b2[0], b2[1]); ctx.lineTo(c2[0], c2[1]); ctx.lineTo(d2[0], d2[1]); ctx.closePath(); ctx.fill();
+      ctx.strokeStyle = 'rgba(230,240,245,0.35)'; ctx.lineWidth = 1;
+      const m1 = P3(x0 + bx.w * 0.3, y0 + 0.15, z1 + 0.01), m2 = P3(x0 + bx.w * 0.15, y0 + bx.h * 0.6, z1 + 0.01);
+      ctx.beginPath(); ctx.moveTo(m1[0], m1[1]); ctx.lineTo(m2[0], m2[1]); ctx.stroke();
+    }
+    if (kind === 'duct') { // emendas do duto
+      ctx.strokeStyle = 'rgba(40,44,46,0.4)'; ctx.lineWidth = 0.7; ctx.beginPath();
+      if (bx.w > bx.h) for (let x = x0 + 0.5; x < x1; x += 0.5) { const p0 = P3(x, y1, z0), p1 = P3(x, y1, z1), p2 = P3(x, y0, z1); ctx.moveTo(p0[0], p0[1]); ctx.lineTo(p1[0], p1[1]); ctx.lineTo(p2[0], p2[1]); }
+      else for (let y = y0 + 0.5; y < y1; y += 0.5) { const p0 = P3(x1, y, z0), p1 = P3(x1, y, z1), p2 = P3(x0, y, z1); ctx.moveTo(p0[0], p0[1]); ctx.lineTo(p1[0], p1[1]); ctx.lineTo(p2[0], p2[1]); }
+      ctx.stroke();
     }
     if (kind === 'ac') {
       const t = P3(x0 + bx.w / 2, y0 + bx.h / 2, z1);

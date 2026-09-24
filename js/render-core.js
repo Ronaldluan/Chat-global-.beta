@@ -17,7 +17,35 @@
   R.WALL_M = G.CONST.WALL_H / ZPX; // ~2,42 m
   R.DX = [1, 0, -1, 0];
   R.DY = [0, 1, 0, -1];
-  R.S = 1; // escala dos caches (1 ou 2, conforme o zoom)
+  R.S = 1; // escala dos caches (0.5, 1 ou 2, conforme o zoom — com histerese)
+
+  // ------------------------------------------------------------------
+  // Números de ajuste centralizados (luz, memória, orçamentos, zoom...)
+  // ------------------------------------------------------------------
+  R.TUNE = {
+    // memória (fora da visão atual; nunca-visto conta como memória): brilho e "névoa" cinza
+    mem: { day: 0.78, night: 0.45, desat: 0.28, blueNight: 0.1 },
+    // luar externo (céu limpo), reduzido por nuvens/chuva
+    moon: [0.13, 0.15, 0.26], moonCloud: 0.55,
+    // interiores de dia: fator base, ganho pela luz das janelas, mínimo
+    interior: { day: 0.75, win: 0.45, minDay: 0.5 },
+    // atores visíveis no escuro: brilho mínimo e contorno frio (luar)
+    actorMin: [0.26, 0.29, 0.4], rim: [46, 62, 104],
+    // lanterna
+    flash: { r: 12.5, half: 0.46, I: 1.65, glow: 0.32 },
+    // FOV: raio de dia, raio "no escuro", cone (meio-ângulo), percepção atrás, limiar de luz
+    fov: { r: 30, darkR: 7.5, cone: 1.745, percept: 1.9, lightMin: 0.2, fogK: 0.62, jump: 6 },
+    // orçamentos por quadro (ms)
+    budget: { ground: 4, groundCold: 14, walls: 2, objects: 3, actors: 2, roofs: 2, shadows: 2.5 },
+    // zoom e escalas de cache (histerese)
+    zoom: { min: 0.6, max: 2.0, step: 1.12, s2up: 1.25, s2down: 1.05, sHalfDown: 0.78, sHalfUp: 0.85 },
+    // raio-X (buraco suave) quando o jogador está oculto por telhado/paredes/copas
+    xray: { r: 82, soft: 40, alpha: 0.22, rings: 5 },
+    // pós
+    vignette: 0.42, grain: 0.07, lightning: 0.72,
+    // hora dourada: luz quente aditiva no chão ao sol e sombras azuladas
+    warm: [62, 34, 8], shadowTint: [18, 26, 54],
+  };
 
   // ------------------------------------------------------------------
   // Cores
@@ -51,7 +79,6 @@
     a = R.hex(a); b = R.hex(b);
     return [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t];
   };
-  R.lighten = (c, t) => R.mix(c, [255, 255, 255], t);
   R.darken = (c, t) => R.mix(c, [0, 0, 0], t);
   R.desat = function (c, t) {
     c = R.hex(c);
@@ -75,20 +102,40 @@
     return c;
   };
 
-  // Cache simples com limite (apaga os mais antigos)
+  // Cache LRU de verdade: get() marca como recente (reinsere no fim); set() despeja o menos usado
   R.Cache = function (max) {
     this.max = max; this.map = new Map();
   };
-  R.Cache.prototype.get = function (k) { return this.map.get(k); };
+  R.Cache.prototype.get = function (k) {
+    const v = this.map.get(k);
+    if (v !== undefined) { this.map.delete(k); this.map.set(k, v); }
+    return v;
+  };
+  R.Cache.prototype.peek = function (k) { return this.map.get(k); };
+  R.Cache.prototype.has = function (k) { return this.map.has(k); };
+  R.Cache.prototype.delete = function (k) { return this.map.delete(k); };
   R.Cache.prototype.set = function (k, v) {
+    if (this.map.has(k)) this.map.delete(k);
     this.map.set(k, v);
-    if (this.map.size > this.max) {
-      let n = (this.max * 0.25) | 0;
-      for (const key of this.map.keys()) { this.map.delete(key); if (--n <= 0) break; }
-    }
+    while (this.map.size > this.max) this.map.delete(this.map.keys().next().value);
     return v;
   };
   R.Cache.prototype.clear = function () { this.map.clear(); };
+  Object.defineProperty(R.Cache.prototype, 'size', { get() { return this.map.size; } });
+
+  // Strings 'rgb(...)' para cores do mapa de luz (0..1 por canal), sem alocar a cada quadro
+  const rgbCache = new Map();
+  R.rgb01 = function (r, g, b) {
+    const R8 = r >= 1 ? 255 : r <= 0 ? 0 : (r * 255) | 0, G8 = g >= 1 ? 255 : g <= 0 ? 0 : (g * 255) | 0, B8 = b >= 1 ? 255 : b <= 0 ? 0 : (b * 255) | 0;
+    const k = (R8 << 16) | (G8 << 8) | B8;
+    let s = rgbCache.get(k);
+    if (s === undefined) {
+      if (rgbCache.size > 6000) rgbCache.clear();
+      s = 'rgb(' + R8 + ',' + G8 + ',' + B8 + ')';
+      rgbCache.set(k, s);
+    }
+    return s;
+  };
 
   // ------------------------------------------------------------------
   // Iluminação "de arte" dos sprites (fixa; o dinâmico vem do mapa de luz)
@@ -214,20 +261,18 @@
       if (nx === this.R0 && ny === this.R1) return 'right';
       return 'left';
     };
-    // face sul (+y)
-    if (y1 - y0 > 1e-6 || true) {
-      if (x1 > x0 && z1 > z0) {
-        face([x0, y1, z0, x1, y1, z0, x1, y1, z1, x0, y1, z1], R.faceBright(0, 1, 0));
-        if (deco) { const n = localName(0, 1); if (deco[n]) this.faceDeco(n, a0, a1, d0, d1, z0, z1, deco[n]); }
-      }
-      if (y1 > y0 && z1 > z0) {
-        face([x1, y0, z0, x1, y1, z0, x1, y1, z1, x1, y0, z1], R.faceBright(1, 0, 0));
-        if (deco) { const n = localName(1, 0); if (deco[n]) this.faceDeco(n, a0, a1, d0, d1, z0, z1, deco[n]); }
-      }
-      if (x1 > x0 && y1 > y0) {
-        face([x0, y0, z1, x1, y0, z1, x1, y1, z1, x0, y1, z1], R.faceBright(0, 0, 1));
-        if (deco && deco.top) this.topDeco(z1, deco.top);
-      }
+    // faces visíveis: sul (+y), leste (+x) e topo
+    if (x1 > x0 && z1 > z0) {
+      face([x0, y1, z0, x1, y1, z0, x1, y1, z1, x0, y1, z1], R.faceBright(0, 1, 0));
+      if (deco) { const n = localName(0, 1); if (deco[n]) this.faceDeco(n, a0, a1, d0, d1, z0, z1, deco[n]); }
+    }
+    if (y1 > y0 && z1 > z0) {
+      face([x1, y0, z0, x1, y1, z0, x1, y1, z1, x1, y0, z1], R.faceBright(1, 0, 0));
+      if (deco) { const n = localName(1, 0); if (deco[n]) this.faceDeco(n, a0, a1, d0, d1, z0, z1, deco[n]); }
+    }
+    if (x1 > x0 && y1 > y0) {
+      face([x0, y0, z1, x1, y0, z1, x1, y1, z1, x0, y1, z1], R.faceBright(0, 0, 1));
+      if (deco && deco.top) this.topDeco(z1, deco.top);
     }
     return this;
   };

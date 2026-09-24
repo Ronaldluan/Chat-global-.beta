@@ -12,7 +12,9 @@
   const RO = (R.objects = {});
   const ZPX = R.ZPX;
   let S = 1, map = null;
-  const cache = new Map();
+  // sprites por escala (LRU real); trocar de zoom não descarta nada
+  const caches = { 0.5: new R.Cache(1200), 1: new R.Cache(1200), 2: new R.Cache(500) };
+  const snaps = new WeakMap(); // deslocamento de encosto na parede (sem escrever no objeto do jogo)
 
   // ------------------------------------------------------------------
   // Fila de desenho com ordenação por profundidade dentro do objeto
@@ -101,68 +103,79 @@
     };
   }
 
-  // Árvores: copa = silhueta escura irregular + dezenas de tufos de folhas iluminados
-  // (luz de cima/esquerda), ordenados por profundidade, com pontinhos de folhas.
-  function canopy(M, a, d, zc, rad, cols, rng, n, flat) {
+  // Árvores: copa em 2–4 massas irregulares (silhueta escura + tufos iluminados de cima/esquerda,
+  // ordenados por profundidade, com pontinhos de folhas) e galhos aparecendo entre as massas.
+  function mass(M, c0x, c0y, Rx, Ry, base, rng, n) {
     const ctx = M.ctx;
-    const c0 = M.p(a, d, zc);
-    const Rx = rad * 40, Ry = rad * 34 * (flat ? 0.85 + flat * 0.2 : 1);
-    const base = cols.map((c) => R.hex(c));
-    const dark = R.darken(base[0], 0.45);
-    // silhueta de fundo (sombra interna)
+    const dark = R.darken(base[0], 0.5);
+    // silhueta de fundo irregular (sombra interna)
     ctx.fillStyle = R.css(dark);
-    for (let k = 0; k < 14; k++) {
-      const t = rng() * 6.283, rr = 0.55 + rng() * 0.3;
-      const x = c0[0] + Math.cos(t) * Rx * rr * 0.6, y = c0[1] + Math.sin(t) * Ry * rr * 0.55 + Ry * 0.08;
-      ctx.beginPath(); ctx.arc(x, y, Rx * (0.32 + rng() * 0.18), 0, 6.283); ctx.fill();
+    for (let k = 0; k < 10; k++) {
+      const t = rng() * 6.283, rr = 0.5 + rng() * 0.35;
+      const x = c0x + Math.cos(t) * Rx * rr * 0.62, y = c0y + Math.sin(t) * Ry * rr * 0.55 + Ry * 0.1;
+      ctx.beginPath(); ctx.arc(x, y, Rx * (0.3 + rng() * 0.18), 0, 6.283); ctx.fill();
     }
     // tufos na superfície de um elipsoide
     const clumps = [];
-    const N = n * 6 + 16;
-    for (let k = 0; k < N; k++) {
+    for (let k = 0; k < n; k++) {
       const th = rng() * 6.283;
-      const ph = Math.acos(1 - 2 * rng()); // esfera uniforme
-      let nx = Math.sin(ph) * Math.cos(th), ny = Math.sin(ph) * Math.sin(th), nz = Math.cos(ph);
+      const ph = Math.acos(1 - 2 * rng());
+      const nx = Math.sin(ph) * Math.cos(th), ny = Math.sin(ph) * Math.sin(th);
+      let nz = Math.cos(ph);
       if (nz < -0.55) nz = -0.55 + rng() * 0.2; // base achatada
-      // posição em tela (x: esquerda/direita, y: vertical com profundidade)
-      const sx = c0[0] + nx * Rx * 0.88, sy = c0[1] - nz * Ry * 0.78 + ny * Ry * 0.32;
-      const depth = ny * 0.7 - nz * 0.1; // >0: mais perto da câmera
-      const lit = -nx * 0.55 + nz * 0.75 + ny * 0.25; // luz de cima-esquerda-frente
-      clumps.push({ sx, sy, depth, lit, r: Rx * (0.13 + rng() * 0.11), c: base[(rng() * base.length) | 0] });
+      const sx = c0x + nx * Rx * 0.86, sy = c0y - nz * Ry * 0.76 + ny * Ry * 0.3;
+      const depth = ny * 0.7 - nz * 0.1;
+      const lit = -nx * 0.55 + nz * 0.75 + ny * 0.25;
+      clumps.push({ sx, sy, depth, lit, r: Rx * (0.16 + rng() * 0.12), c: base[(rng() * base.length) | 0] });
     }
     clumps.sort((p, q) => p.depth - q.depth);
     for (const cl of clumps) {
-      const L = 0.66 + Math.max(-0.25, cl.lit) * 0.5;
+      const L = 0.62 + Math.max(-0.3, cl.lit) * 0.52;
       const g = ctx.createRadialGradient(cl.sx - cl.r * 0.4, cl.sy - cl.r * 0.45, cl.r * 0.1, cl.sx, cl.sy, cl.r * 1.05);
-      g.addColorStop(0, R.css(cl.c, L * 1.12));
+      g.addColorStop(0, R.css(cl.c, L * 1.14));
       g.addColorStop(0.7, R.css(cl.c, L));
-      g.addColorStop(1, R.css(cl.c, L * 0.84));
+      g.addColorStop(1, R.css(cl.c, L * 0.8));
       ctx.fillStyle = g;
       ctx.beginPath();
-      // borda levemente irregular (folhagem)
-      const pts = 9;
+      const pts = 10;
       for (let j = 0; j <= pts; j++) {
-        const t = j / pts * 6.283, rr = cl.r * (0.86 + rng() * 0.22);
-        const x = cl.sx + Math.cos(t) * rr, y = cl.sy + Math.sin(t) * rr * 0.9;
+        const t = j / pts * 6.283, rr = cl.r * (0.82 + rng() * 0.28);
+        const x = cl.sx + Math.cos(t) * rr, y = cl.sy + Math.sin(t) * rr * 0.88;
         if (j) ctx.lineTo(x, y); else ctx.moveTo(x, y);
       }
       ctx.closePath(); ctx.fill();
-      // folhas miúdas no lado iluminado
-      const nd = Math.round(cl.r * 0.9);
+      // folhas miúdas (textura) no lado iluminado e alguns pontos escuros
+      const nd = Math.round(cl.r * 1.1);
       for (let j = 0; j < nd; j++) {
-        const t = -2.4 + rng() * 2.2, rr = cl.r * (0.3 + rng() * 0.65);
-        ctx.fillStyle = R.css(cl.c, L * (1.35 + rng() * 0.25), 0.85);
-        ctx.fillRect(cl.sx + Math.cos(t) * rr, cl.sy + Math.sin(t) * rr * 0.9, 1.4, 1.1);
+        const t = -2.5 + rng() * 2.4, rr = cl.r * (0.25 + rng() * 0.7);
+        ctx.fillStyle = R.css(cl.c, L * (1.3 + rng() * 0.3), 0.85);
+        ctx.fillRect(cl.sx + Math.cos(t) * rr, cl.sy + Math.sin(t) * rr * 0.88, 1.4, 1.1);
       }
-      M.pts.push(cl.sx - cl.r, cl.sy, cl.sx + cl.r, cl.sy, cl.sx, cl.sy - cl.r, cl.sx, cl.sy + cl.r);
+      for (let j = 0; j < nd * 0.4; j++) {
+        const t = 0.6 + rng() * 2.2, rr = cl.r * (0.3 + rng() * 0.6);
+        ctx.fillStyle = R.css(cl.c, L * 0.6, 0.7);
+        ctx.fillRect(cl.sx + Math.cos(t) * rr, cl.sy + Math.sin(t) * rr * 0.88, 1.3, 1);
+      }
     }
     // folhas soltas na borda (silhueta menos redonda)
-    for (let k = 0; k < 40; k++) {
-      const t = rng() * 6.283, rr = 0.9 + rng() * 0.16;
-      const x = c0[0] + Math.cos(t) * Rx * rr, y = c0[1] + Math.sin(t) * Ry * rr * 0.85 - Ry * 0.05;
-      const up = Math.sin(t) < 0;
-      ctx.fillStyle = R.css(base[(rng() * base.length) | 0], up ? 1.15 : 0.7);
-      ctx.beginPath(); ctx.ellipse(x, y, 1.6 + rng() * 1.6, 1.2 + rng(), rng() * 3, 0, 6.283); ctx.fill();
+    for (let k = 0; k < 26; k++) {
+      const t = rng() * 6.283, rr = 0.88 + rng() * 0.18;
+      const x = c0x + Math.cos(t) * Rx * rr, y = c0y + Math.sin(t) * Ry * rr * 0.85 - Ry * 0.05;
+      ctx.fillStyle = R.css(base[(rng() * base.length) | 0], Math.sin(t) < 0 ? 1.15 : 0.7);
+      ctx.beginPath(); ctx.ellipse(x, y, 1.5 + rng() * 1.6, 1.1 + rng(), rng() * 3, 0, 6.283); ctx.fill();
+    }
+  }
+  // masses: [{a, d, z, r, fy}] em coords locais; galhos do tronco (a0,d0,zb) até cada massa
+  function crown(M, trunkTop, masses, cols, trunkCol, rng, clumpsPer) {
+    const base = cols.map((c) => R.hex(c));
+    // galhos (desenhados antes: aparecem entre as massas)
+    for (const ms of masses) M.line(trunkTop[0], trunkTop[1], trunkTop[2], ms.a, ms.d, ms.z - ms.r * 0.3, trunkCol, 2.4, 'round');
+    for (let k = 0; k < 3; k++) { const ms = masses[(rng() * masses.length) | 0]; M.line(ms.a, ms.d, ms.z - ms.r * 0.35, ms.a + (rng() - 0.5) * ms.r * 1.6, ms.d + (rng() - 0.5) * ms.r * 1.6, ms.z + ms.r * 0.1, trunkCol, 1.2, 'round'); }
+    // massas de trás para a frente
+    const order = masses.slice().sort((p, q) => (p.a + p.d - p.z * 0.25) - (q.a + q.d - q.z * 0.25));
+    for (const ms of order) {
+      const c0 = M.p(ms.a, ms.d, ms.z);
+      mass(M, c0[0], c0[1], ms.r * 40, ms.r * 34 * (ms.fy || 0.9), base, rng, clumpsPer);
     }
   }
 
@@ -453,24 +466,35 @@
       });
     }
   }, { norot: true });
-  def('tree', 7.2, 96, (M, o, v) => {
+  def('tree', 7.4, 118, (M, o, v) => {
     const rng = U.rng(o.id * 13 + v * 7 + 1);
-    const species = v % 8;
-    const birch = species === 6, sparse = species === 7;
-    const trunk = birch ? '#d8d4cc' : pick(['#5a4636', '#4e3e30', '#63503e'], v);
-    const h = 1.9 + rng() * 0.6;
-    const zc = h + 1.9 + rng() * 0.6;
-    const rad = birch ? 1.05 : 1.35 + rng() * 0.35;
-    const cols = birch ? ['#7d9a4a', '#8fa656', '#6d8a42', '#a0aa5c'] : species >= 4 ? ['#5d7a36', '#6f8a40', '#557234', '#7a8c44', '#6a7e3c'] : ['#46622e', '#50702f', '#3e5a2a', '#5a7438', '#4a6630'];
-    // tronco + galhos
-    M.cyl(0.5, 0.5, 0.13, 0, h + 0.8, trunk);
-    if (birch) { const b = M.p(0.5, 0.5, 0); M.ctx.fillStyle = '#2a2622'; for (let k = 0; k < 6; k++) M.ctx.fillRect(b[0] - 4 + rng() * 5, b[1] - (0.3 + rng() * (h)) * ZPX, 3, 1); }
-    M.line(0.5, 0.5, h, 0.2, 0.3, h + 1.0, trunk, 3, 'round');
-    M.line(0.5, 0.5, h + 0.2, 0.85, 0.6, h + 1.2, trunk, 2.6, 'round');
+    const species = v % 8; // 0-1 carvalho · 2-3 bordo · 4-5 olmo claro · 6 bétula · 7 ralo (seco)
+    const birch = species === 6, sparse = species === 7, maple = species === 2 || species === 3, elm = species === 4 || species === 5;
+    const trunk = birch ? '#d8d4cc' : pick(['#5a4636', '#4e3e30', '#63503e', '#574636'], v);
+    const h = (birch ? 2.1 : 1.6) + rng() * 0.6;
+    const cols = birch ? ['#7d9a4a', '#8fa656', '#6d8a42', '#a0aa5c'] : maple ? ['#5a7a34', '#6a8a3c', '#4e6c2e', '#76903f', '#62803a']
+      : elm ? ['#5d7a36', '#6f8a40', '#557234', '#7a8c44', '#6a7e3c'] : sparse ? ['#6a7a3a', '#7a7a40', '#5e6a34'] : ['#46622e', '#50702f', '#3e5a2a', '#5a7438', '#4a6630'];
+    // tronco (levemente afunilado) + raízes
+    M.cyl(0.5, 0.5, birch ? 0.1 : 0.14, 0, h + 0.6, trunk);
+    const b0 = M.p(0.5, 0.5, 0);
+    M.ctx.fillStyle = R.css(trunk, 0.75);
+    for (let k = 0; k < 3; k++) { const a = rng() * 6.283; M.ctx.beginPath(); M.ctx.ellipse(b0[0] + Math.cos(a) * 6, b0[1] + Math.sin(a) * 2.5, 4, 1.6, a, 0, 6.283); M.ctx.fill(); }
+    if (birch) { M.ctx.fillStyle = '#2a2622'; for (let k = 0; k < 8; k++) M.ctx.fillRect(b0[0] - 3 + rng() * 5, b0[1] - (0.3 + rng() * h) * ZPX, 3, 1); }
+    // massas da copa
+    const nM = sparse ? 3 : birch ? 3 + ((rng() * 2) | 0) : 3 + ((rng() * 2) | 0);
+    const top = [0.5, 0.5, h + 0.4];
+    const masses = [];
+    const R0 = birch ? 1.05 : maple ? 1.36 : 1.26;
+    for (let k = 0; k < nM; k++) {
+      const a = (k / nM) * 6.283 + rng() * 1.2;
+      const off = (k === 0 ? 0.12 : 0.5 + rng() * 0.3) * (birch ? 0.65 : 1);
+      masses.push({ a: 0.5 + Math.cos(a) * off, d: 0.5 + Math.sin(a) * off, z: h + 0.85 + rng() * (birch ? 1.3 : 0.9) + (k === 0 ? 0.6 : 0), r: R0 * (0.75 + rng() * 0.35) * (k === 0 ? 1.1 : 1), fy: birch ? 1.15 : 0.85 });
+    }
     if (sparse) {
-      for (let k = 0; k < 7; k++) { const a = 0.5 + (rng() - 0.5) * 2.2, d = 0.5 + (rng() - 0.5) * 2.2; M.line(0.5, 0.5, h + 0.5, a, d, zc + (rng() - 0.3) * 1.6, trunk, 1.4, 'round'); }
-      canopy(M, 0.5, 0.5, zc, rad * 0.9, ['#6a7a3a', '#7a7a40', '#5e6a34'], rng, 5, 0.6);
-    } else canopy(M, 0.5, 0.5, zc, rad, cols, rng, 9 + ((rng() * 4) | 0), 0.72);
+      for (let k = 0; k < 7; k++) M.line(0.5, 0.5, h + 0.2, 0.5 + (rng() - 0.5) * 2.4, 0.5 + (rng() - 0.5) * 2.4, h + 1.4 + rng() * 1.6, trunk, 1.4, 'round');
+      for (const ms of masses) ms.r *= 0.75;
+    }
+    crown(M, top, masses, cols, trunk, rng, sparse ? 14 : 22);
   }, { norot: true });
   def('pine', 8.2, 70, (M, o, v) => {
     const rng = U.rng(o.id * 17 + v * 3 + 5);
@@ -779,7 +803,6 @@
   });
   def('fountain', 1.8, 12, (M, o, v, A, D) => {
     const stone = '#a8a298';
-    const prof = [];
     const n = 8;
     // bacia octogonal: borda externa como prisma octogonal e água dentro
     const oct = (r, z0, z1, col) => {
@@ -790,7 +813,6 @@
       for (let k = 0; k < n; k++) faces.push([bot[k], bot[(k + 1) % n], top[(k + 1) % n], top[k]]);
       M.convex(faces, col);
     };
-    void prof;
     oct(0.95, 0, 0.45, stone);
     M.flatEllipse(A / 2, D / 2, 0.45, 0.8, 0.8, '#3e6a78');
     M.topDeco(0.451, (g) => { g.fillStyle = '#4a7a88'; g.beginPath(); for (let k = 0; k < n; k++) { const t = (k + 0.5) / n * 6.283; g.lineTo(A / 2 + Math.cos(t) * 0.8, D / 2 + Math.sin(t) * 0.8); } g.closePath(); g.fill(); g.strokeStyle = 'rgba(200,230,235,0.35)'; g.lineWidth = 0.03; g.beginPath(); g.ellipse(A / 2, D / 2, 0.4, 0.4, 0, 0, 6.283); g.stroke(); g.beginPath(); g.ellipse(A / 2, D / 2, 0.62, 0.62, 0, 0, 6.283); g.stroke(); });
@@ -804,10 +826,11 @@
   });
 
   // Veículos: carroceria em prismas convexos (parte baixa + cabine), rodas octogonais
+  // roda: desenhada na hora (antes da fila da carroceria) → fica atrás dela, aparecendo embaixo
   function wheel(M, a0, a1, d, r, flat) {
     const prof = [];
-    for (let k = 0; k < 10; k++) { const t = k / 10 * 6.283; prof.push([d + Math.cos(t) * r, r * (flat ? 0.8 : 1) + Math.sin(t) * r]); }
-    M.P(prof, a0, a1, '#1c1c1c', { faceColors: ['#6a6c6e', '#6a6c6e'] });
+    for (let k = 0; k < 12; k++) { const t = k / 12 * 6.283; prof.push([d + Math.cos(t) * r, r * (flat ? 0.8 : 1) + Math.sin(t) * r]); }
+    M.prism(prof, a0, a1, '#1c1c1c', { faceColors: ['#5e6062', '#5e6062'] });
   }
   function vehicle(M, o, v, A, D, kind) {
     const wrecked = !!o.wrecked;
@@ -823,6 +846,9 @@
     // rodas (ordenadas junto com a carroceria)
     for (const d of [dR, dF]) { wheel(M, 0.06, 0.32, d, wr, wrecked && d === dF); wheel(M, A - 0.32, A - 0.06, d, wr, false); }
     const side = (g, f) => {
+      // caixas de roda (escuras) sobre as rodas
+      g.fillStyle = 'rgba(16,16,16,0.92)';
+      for (const d of [dR, dF]) { g.beginPath(); g.moveTo(d - wr - 0.06, 0.28); g.arc(d, 0.3, wr + 0.06, Math.PI, 0, true); g.closePath(); g.fill(); }
       g.strokeStyle = R.css(body, 0.55); g.lineWidth = 0.02;
       g.beginPath(); g.moveTo(f.u0 + 0.1, 0.62); g.lineTo(f.u1 - 0.1, 0.62); g.stroke();
       if (kind === 'police') { g.fillStyle = '#e8e6e0'; g.fillRect(f.u0 + D * 0.3, 0.3, D * 0.4, 0.5); g.fillStyle = '#c8b050'; g.fillRect(f.u0 + D * 0.46, 0.5, 0.12, 0.14); }
@@ -910,9 +936,10 @@
     'bookshelf', 'tv', 'desk', 'kitchen_counter', 'counter', 'washing_machine', 'workbench', 'locker', 'gun_locker', 'medicine_cabinet', 'vending_machine',
     'freezer', 'lamp', 'plant', 'crate', 'barrel', 'pallet', 'cash_register', 'trash_can']);
   RO.snap = function (o) {
-    if (o._rs) return o._rs;
-    const rs = [0, 0];
-    o._rs = rs;
+    let rs = snaps.get(o);
+    if (rs) return rs;
+    rs = [0, 0];
+    snaps.set(o, rs);
     if (!map || !o.building || !WALLSNAP.has(o.type)) return rs;
     const m = map;
     const isW = (x, y) => x >= 0 && y >= 0 && x < m.w && y < m.h && m.wall[y * m.w + x] && R.walls.isStruct(m.wall[y * m.w + x]) || (x >= 0 && y >= 0 && x < m.w && y < m.h && R.walls.isOpening(m.wall[y * m.w + x]));
@@ -938,10 +965,11 @@
   const VARIETY = { tree: 5, pine: 5, bush: 4, rock: 4, shelf: 6, bookshelf: 6, clothesline: 3, plant: 3 };
   const siblings = new Map();
   RO.budget = 1e9;
-  RO.reset = function (m) { map = m; cache.clear(); siblings.clear(); if (m) for (const o of m.objects) delete o._rs; };
-  RO.setScale = function (s) { if (s !== S) { S = s; cache.clear(); siblings.clear(); } };
+  RO.hardCap = 8;
+  RO.stats = { gen: 0, ms: 0, worst: 0, worstType: '' };
+  RO.reset = function (m) { map = m; for (const k in caches) caches[k].clear(); siblings.clear(); };
+  RO.setScale = function (s) { S = s; };
   RO.def = (type) => DEF[type] || { h: 1.5, mx: 8 };
-  RO.lit = function (o, s) { return !!(o.light && s && s.power); };
 
   RO.sprite = function (o, lit) {
     const d = DEF[o.type] || { h: 1.5, mx: 8 };
@@ -954,10 +982,15 @@
     const sub = vr ? o.id % vr : 0;
     const base = o.type + '|' + rot + '|' + o.w + 'x' + o.h + '|' + (o.wrecked ? 1 : 0) + (lit ? 'L' : '') + (bv ? '|b' + bv : '') + (rt === 'bathroom' ? '|bath' : '');
     const key = base + '|' + v + '|' + sub;
+    const cache = caches[S];
     let spr = cache.get(key);
     if (spr) return spr;
-    // orçamento por quadro: se estourou, usa um irmão já pronto (troca quando for gerado)
-    if (RO.budget <= 0) { const alt = siblings.get(base); if (alt) return alt; }
+    // orçamento por quadro: se estourou, usa o mesmo sprite em outra escala ou um irmão já pronto
+    if (RO.budget <= 0) {
+      for (const k in caches) { if (+k === S) continue; const alt = caches[k].peek(key); if (alt) return alt; }
+      const alt = siblings.get(base + '|' + S); if (alt) return alt;
+      if (RO.budget < -RO.hardCap) return null; // teto rígido (quem chama pula o objeto neste quadro)
+    }
     const tGen = performance.now();
     const A = rot & 1 ? o.w : o.h, D = rot & 1 ? o.h : o.w;
     const mx = d.mx + 4;
@@ -973,16 +1006,17 @@
     const oid = { id: vr ? sub * 7 + v * 3 + 1 : v, wrecked: o.wrecked, room: o.room, height: o.height };
     try { fn(M, oid, v, A, D, { bv: bv ? (R.hash(bv, 1, 5) * 6) | 0 : v, room: rt, lit }); } catch (e) { console.error('[render] objeto', o.type, e); }
     M.end();
-    spr = { c, L, TOP, w: W, h: H, hull: silhouette(g, W * S, H * S, S, L, TOP) };
+    spr = { c, L, TOP, w: W, h: H };
     trim(spr, g, W * S, H * S);
     if (d.light) { const lx = M.X(d.light[0], d.light[1]), ly = M.Y(d.light[0], d.light[1]); spr.light = [lx, ly, d.light[2]]; }
     cache.set(key, spr);
-    siblings.set(base, spr);
-    RO.budget -= performance.now() - tGen;
-    if (cache.size > (S > 1 ? 500 : 1200)) { let n = 150; for (const k of cache.keys()) { cache.delete(k); if (--n <= 0) break; } siblings.clear(); }
+    siblings.set(base + '|' + S, spr);
+    if (siblings.size > 600) siblings.clear();
+    const dtg = performance.now() - tGen;
+    RO.budget -= dtg; RO.stats.gen++; RO.stats.ms += dtg; if (dtg > RO.stats.worst) { RO.stats.worst = dtg; RO.stats.worstType = o.type; }
     return spr;
   };
-  RO.cacheSize = () => cache.size;
+  RO.cacheSize = () => caches[S].size;
   // Recorta o sprite ao retângulo opaco (menos pixels para rasterizar a cada quadro)
   function trim(spr, g, cw, ch) {
     let data;
@@ -995,44 +1029,8 @@
     if (x1 < 0) return;
     x0 = Math.max(0, x0 - 1); y0 = Math.max(0, y0 - 1); x1 = Math.min(cw - 1, x1 + 1); y1 = Math.min(ch - 1, y1 + 1);
     if (x1 - x0 + 1 >= cw - 2 && y1 - y0 + 1 >= ch - 2) return;
-    const S = R.S || 1;
     const c = R.canvas(x1 - x0 + 1, y1 - y0 + 1);
     c.getContext('2d').drawImage(spr.c, -x0, -y0);
     spr.c = c; spr.L -= x0 / S; spr.TOP -= y0 / S; spr.w = c.width / S; spr.h = c.height / S;
   }
-  // Contorno x-monótono do sprite (topo e base de cada coluna opaca), em px isométricos
-  // relativos à âncora. Usado para aplicar a luz do objeto exatamente sobre ele.
-  function silhouette(g, cw, ch, S, L, TOP) {
-    let data;
-    try { data = g.getImageData(0, 0, cw, ch).data; } catch (e) { return new Float32Array(0); }
-    const step = Math.max(2, Math.round((cw / S > 120 ? 6 : 4) * S));
-    const cols = [];
-    for (let x = 0; x < cw; x += step) {
-      let y0 = ch, y1 = -1;
-      const xe = Math.min(cw, x + step);
-      for (let xx = x; xx < xe; xx++) {
-        for (let y = 0; y < y0; y++) if (data[(y * cw + xx) * 4 + 3] > 50) { y0 = y; break; }
-        for (let y = ch - 1; y > y1; y--) if (data[(y * cw + xx) * 4 + 3] > 50) { y1 = y; break; }
-      }
-      if (y1 < 0) { cols.push(null); continue; }
-      cols.push([x, xe, y0, y1]);
-    }
-    // escada: topo esquerda→direita, base direita→esquerda (só colunas contíguas não vazias; pega o maior trecho)
-    let best = null, cur = [];
-    for (const c of cols) { if (c) cur.push(c); else { if (!best || cur.length > best.length) best = cur; cur = []; } }
-    if (!best || cur.length > best.length) best = cur;
-    if (!best.length) return new Float32Array(0);
-    const top = [], bot = [];
-    for (let k = 0; k < best.length; k++) {
-      const [x0, x1, y0, y1] = best[k];
-      if (k && best[k - 1][2] === y0) top[top.length - 2] = x1; else top.push(x0, y0, x1, y0);
-      if (k && best[k - 1][3] === y1) bot[bot.length - 2] = x1; else bot.push(x0, y1 + 1, x1, y1 + 1);
-    }
-    const out = new Float32Array(top.length + bot.length);
-    let k = 0;
-    for (let i = 0; i < top.length; i += 2) { out[k++] = top[i] / S - L; out[k++] = top[i + 1] / S - TOP; }
-    for (let i = bot.length - 2; i >= 0; i -= 2) { out[k++] = bot[i] / S - L; out[k++] = bot[i + 1] / S - TOP; }
-    return out;
-  }
-  RO.TYPES = Object.keys(MODELS);
 })();

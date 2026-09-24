@@ -102,104 +102,123 @@ centrada no segmento; `sightCost` para escurecer atrás de sebes; plantações =
 ### Arquivos
 Tudo procedural, sem assets. Namespace interno `G.R` (não é contrato; outros módulos usam só `G.render`/`G.fov`).
 Ordem das tags no `index.html` (antes de `js/render.js`):
-- `render-core.js` — `G.R`: escala vertical `R.ZPX = 33` px/m (jogador ≈ 1,75 m ≈ 58 px; parede `R.WALL_M` ≈ 2,42 m =
-  80 px), cores (`R.hex/css/mix/lighten/darken/desat/hash`), cache LRU, casco convexo e o kit de "sprite 3D" `Model`
-  (caixas/prismas/cilindros com faces sombreadas pela luz fixa, ordenadas por profundidade). `R.S` = escala dos
-  caches (1, ou 2 quando zoom > 1,15).
-- `render-ground.js` — pisos em blocos de tela 512×256 (LRU), texturas por tipo com variação por hash, transições
-  suaves (faixas + marching squares para grama/terra/areia/cascalho/asfalto/água, margens com espuma), marcas de rua
-  (`map.roadMarks`), meio-fio/varanda/píer/piscina/ponte, tapetes, AO de parede, tufos/flores. Chão sob paredes finas
-  vem do "quarto-fonte" (`R.ground.qsrc`: exterior de um lado, cômodo do outro).
-- `render-walls.js` — paredes finas por `wallMask`/eixo com junções L/T/+, acabamentos por material/cômodo
-  (siding, tijolo, reboco, bloco, metal, celeiro, tábuas, tronco, papel de parede, azulejo, pintura), portas/janelas em
-  todos os estados (aberta/quebrada/trancada/cortina/barricada 1–4), vitrines, portões de garagem em grupo, cercas de
-  madeira/metal, sebes, `FENCE_GATE`. Sprites por tile (estado estático + recorte + aceso). Telhados reais por
-  `parts/roofType/ridgeAxis` (gable, hip, pyramid, flat com platibanda/AC, chaminés).
-- `render-objects.js` — modelos de todos os tipos de objeto (respeita `w/h/rot`, variantes por hash, carros por
-  `variant`/`wrecked`, sirene), sprites cacheados por tipo/rot/variante com orçamento por quadro (7 ms), silhueta
-  para o mapa de luz. Móveis encostam na parede fina (`RO.snap`).
-- `render-actors.js` — humanos/zumbis com esqueleto 3D simples (direção contínua), ciclos e poses; cadáveres.
-- `render-light.js` — paleta de luz por hora (já com a correção de cor), relâmpago, sol/sombras, luzes estáticas
-  (postes/luminárias com energia, cômodos acesos à noite, janelas), FOV (shadowcasting) e grade de sombreamento.
-- `render-fx.js` — sombras (estáticas em blocos + dinâmicas), decals, poças, partículas, chuva, folhas, neblina,
-  vinheta e grão.
-- `render.js` — orquestra: câmera/zoom, cutaway, telhados, ordenação, mapa de luz, emissivos, overlays, debug.
-- `tools/gallery.html` — mapa sintético 200×200 renderizado pelo próprio `G.render`: todos os pisos, paredes e
-  junções, portas/janelas em todos os estados (eixos x e y), vitrine/garagem, cercas/portões, todos os objetos × 4
-  rotações, telhados (gable x/y, hip, pyramid, flat, L), decals/cadáveres/itens/partículas, cena noturna, e folhas de
-  humanos (16 poses) e zumbis (10 estados) × 8 direções. Abre com duplo clique.
+- `render-core.js` — `G.R`: escala vertical `R.ZPX = 33` px/m (jogador ≈ 1,75 m ≈ 58 px; parede `R.WALL_M` ≈ 2,42 m),
+  **`R.TUNE`** (todos os números de ajuste: memória, luar, interiores, lanterna, FOV, orçamentos, zoom, raio-X, pós),
+  cores (`R.hex/css/mix/darken/desat/rgb01/hash`), `R.Cache` (LRU real), casco convexo e o kit de "sprite 3D".
+  `R.S` = escala dos caches: 0,5 / 1 / 2 conforme o zoom, com histerese (sobe para 2 em 1,25 e desce em 1,05;
+  0,5 abaixo de 0,78 e volta em 0,85). Cada escala tem seus caches; trocar de zoom não descarta nada e, enquanto a
+  escala nova não fica pronta, o sprite da escala antiga é desenhado esticado.
+- `render-ground.js` — chão em blocos de tela (512×256; 1024×512 em zoom baixo) construídos **em fatias** (passes
+  base → transições → suavização → manchas → trilhas → faces → marcas → AO → detalhes) dentro de um orçamento por
+  quadro; bloco que falta mostra um substituto (miniatura (u,v) do mapa ou o bloco de outra escala). Grama com
+  manchas secas/viçosas por ruído, 4–8 tufos em "V" por tile (somem em zoom < 1), trilhas gastas porta → rua, folhas
+  sob as árvores, tabuleiro/sombra de ponte (`map.bridges`), capacho nas portas externas e detalhes "narrativos" por
+  hash (jornais, sacos de lixo encostados em prédios, latas, brinquedos e bicicletas em quintais, papéis e manchas de
+  sangue secas) — só visuais, sem objeto de jogo (se a jogabilidade precisar deles, o mundo deve criá-los).
+- `render-walls.js` — paredes finas, portas/janelas em todos os estados, cercas/sebes; desgaste por variante nas faces
+  externas; arandela ao lado de portas externas (acesa à noite com energia, por sorteio estável prédio/dia);
+  ar-condicionado em algumas janelas. Telhados por `parts/roofType/ridgeAxis` num **sprite por prédio** (telhas com
+  trocas/musgo/escorridos, calhas nos beirais da frente, laje com manchas/remendos, claraboias, AC e dutos, chaminés).
+- `render-objects.js` — modelos de todos os tipos; árvores com 3–5 massas irregulares, galhos e espécies (carvalho,
+  bordo, olmo, bétula, seca); rodas de carro como prismas atrás da carroceria. Encosto na parede via `RO.snap` (WeakMap).
+- `render-actors.js` — humanos/zumbis (volume em 2 tons, contorno escuro, zumbi torto arrastando um pé, roupa rasgada,
+  balanço/respiração parado); zumbis em **sprites cacheados** por aparência/estado/quadro/direção (8 dir., 12 quadros
+  de passada); cadáveres em sprite + poça viva. Estado por ator em WeakMap (nada é escrito nos objetos do jogo).
+- `render-light.js` — curva de luz por hora, luar, relâmpago (2 pulsos), sol/sombras, luzes estáticas (postes/lâmpadas,
+  cômodos acesos, janelas, arandelas) recalculadas **só na região** (raio ~9) de uma porta/janela/cortina que mudou,
+  FOV, grade de sombreamento (u,v) e `lightLum` (base de `G.render.lightAt`).
+- `render-fx.js` — sombras (estáticas em blocos cacheados por posição do sol + dinâmicas), decals, poças, partículas,
+  chuva (fora dos volumes dos prédios abertos), folhas, neblina, vinheta e grão.
+- `render.js` — orquestra: câmera/zoom, cutaway, telhados/raio-X, ordenação, mapa de luz, emissivos, overlays, debug.
+- `tools/gallery.html` — mapa sintético 200×200 renderizado pelo próprio `G.render` (com `opts.sync`): pisos, paredes,
+  portas/janelas (eixos x e y), cercas, todos os objetos × 4 rotações, telhados, decals/cadáveres, cena noturna e
+  folhas de humanos (16 poses) e zumbis (10 estados) × 8 direções.
 
 ### Pipeline de um quadro
-chão (blocos cacheados) → água/respingos → decals/poças → cadáveres e itens (só onde `vis > 0`) → sombras do sol
-(estáticas cacheadas por posição do sol + dinâmicas) → passe vertical ordenado (paredes com recorte, objetos
-fatiados em colunas de meio tile — objetos grandes ordenam certo —, zumbis, jogador; árvores balançam; objeto alto
-na frente do jogador fica translúcido) → telhados (+ copas altas na frente redesenhadas recortadas) → partículas →
-mapa de luz em meia resolução (`multiply`: grade (u,v) por meio tile + quads verticais de paredes/objetos/atores/
-telhados com gradiente) + dessaturação da memória (`saturation`, exceto o que está à vista na frente) → emissivos
-(halos de postes, janelas acesas, sirene, máquinas) → neblina → chuva (não cai dentro do prédio do jogador) → folhas
-→ relâmpago, vinheta, grão → overlays (tile do mouse, mira) → debug.
+chão (blocos) → letreiros/parapeitos → água/decals/poças → luz quente do entardecer (aditiva) → sombras do sol
+(tom azulado) → sombras de contato → cadáveres/itens (só `canSee`) → passe vertical ordenado (paredes com recorte,
+objetos fatiados, zumbis, jogador) → telhados → partículas → "névoa" da memória (¼ de resolução, antes do multiply)
+→ **um** multiply de meia resolução (grade + janelas no chão + ops de paredes/objetos/atores/telhados + clarão de tiro +
+vinheta + grão) → emissivos aditivos (sol nas faces, halos, janelas, arandelas, contorno frio dos atores, feixe da
+lanterna) → neblina/chuva/folhas → relâmpago aditivo → overlays → debug.
+
+### Modelo de visão (estilo PZ) — mudança de contrato/expectativa
+- **Não há névoa de exploração**: o que nunca foi visto é desenhado como memória. Memória = brilho
+  `lerp(R.TUNE.mem.day 0,78, mem.night 0,45, env.night)` + leve tom azul à noite + até 28% de dessaturação (cinza).
+- Só **entidades dinâmicas** somem fora da visão: zumbis, cadáveres e itens no chão aparecem na hora em que
+  `G.fov.canSee` fica verdadeiro e esmaecem só ao sair. Paredes/objetos/decals ficam sempre visíveis. Exceção: com o
+  telhado escondido (jogador dentro), objetos de tiles nunca vistos daquele prédio não são desenhados.
+- **FOV = mesma DDA do `G.world.lineOfSight`** (mesmas quinas, 2 sebes bloqueiam), partindo da posição exata do
+  jogador, com `G.world.sightCost` (sebe 0,5, cerca de madeira 0,15 atenuam). Cone de ±100° (`TUNE.fov.cone`),
+  ~1,9 tile de percepção atrás, raio 30 de dia e 7,5 no escuro fora de luz (tile com luz ≥ `TUNE.fov.lightMin` conta
+  como iluminado; lanterna estende no cone), neblina reduz. Salto > 6 tiles (teleporte) zera a visão antiga.
+- **Percepção**: o JOGADOR vê o que `G.fov.canSee(x, y)` diz (é o que a tela mostra). ZUMBIS devem usar
+  `G.world.lineOfSight` + `G.render.lightAt(x, y)` (luz no jogador: escuro ⇒ detectam mais perto).
 
 ### API (além do contrato)
-- `G.render.opts = { fov, roofs, weather, post, overlays, shadows, fixedTime, satKeep }` (todos `true`/`null` por
-  padrão; a galeria desliga `fov/post/overlays`). `G.render.resetMap()` força reconstruir caches do mapa.
-- `G.render.fps`, `drawMs` (média suavizada), `lastMs`, `stats` (quads, contadores), `sec` (tempos por seção,
-  para profiling). `?debug=1` → overlay com FPS, ms, tile/hora/luz, contadores e anéis de ruído (`state.noises`).
-- `G.fov.compute(state)`, `canSee(x,y)` (alvo > 0,25), `visAt(x,y)` (valor suavizado 0..1), `invalidate()`.
-  `state.fov = { vis, seen, target }`. Visão: ~30 tiles de dia, menos à noite fora de luz (lanterna/postes estendem),
-  cone de ~200° + ~1,9 tile de percepção atrás, neblina reduz; suavizado no tempo; recalcula ao mudar de tile/direção
-  ou a cada 3 quadros (janela de 36 tiles). Paredes visíveis ficam acesas; memória escurecida e dessaturada;
-  nunca visto quase preto. Área de ~24 tiles em volta do início já vem "vista".
-- Zoom: roda do mouse (`input.mouse.wheel`), 0,6–2,0 suave; `G.camera.zoom` alterado por fora é respeitado.
-  `G.camera.shake` (core) é preservado.
+- `G.render.lightAt(x, y)` → 0..1: luz efetiva no ponto (ambiente/luar, interiores, lâmpadas/janelas/arandelas,
+  relâmpago, feixe da lanterna do jogador se o ponto estiver nele e à vista; o brilho cosmético em volta do jogador
+  à noite não conta). Medido: meio-dia fora 1,0; interior de dia 0,7–0,85; noite ao luar 0,14; interior escuro à
+  noite 0,09; sob poste aceso ≈ 1; no feixe da lanterna ≈ 1.
+- `G.fov.compute(state)` inicializa sozinho (mapa novo → estado novo); `canSee(x,y)` (alvo > 0,25; `false` antes de
+  haver mapa), `visAt(x,y)` (suavizado), `invalidate()`. `state.fov = { vis, seen, target }`.
+- `G.render.opts = { fov, roofs, weather, post, overlays, shadows, sync }` — `sync: true` desliga os orçamentos
+  (tudo pronto no mesmo quadro: galeria/capturas). `G.render.resetMap()`, `fps`, `drawMs`, `lastMs`,
+  `stats { ops, keep, list }`, `sec` (tempos por seção). `?debug=1` mostra também "luz no jogador" e blocos faltando.
+- Zoom: `G.input.mouse.wheel` com magnitude (≈1 por clique, trackpad fracionário): passo `1,12^wheel`, 0,6–2,0,
+  suave; `G.camera.zoom` alterado por fora é respeitado.
+- Raio-X: o telhado só some **inteiro** com o jogador dentro do prédio; quando o telhado/parede alta/copa tapa o
+  jogador por fora, abre-se um buraco circular suave (~3 tiles de tela) em volta dele. Copa de árvore sobre o cursor
+  também abre um buraco em volta do cursor. Cutaway: dentro de um prédio todas as paredes da frente dele descem;
+  fora, só as próximas.
+
+### Orçamentos (ms por quadro, `R.TUNE.budget`) e limites
+Chão 4 (14 quando faltam blocos), paredes 2, objetos 3, atores 2, telhados 2, sombras estáticas 2,5. Estourou: usa o
+sprite de outra escala (ou um irmão da mesma variedade); sem substituto, ainda gera até um teto rígido
+(paredes +6 ms, objetos +8 ms) e o resto aparece nos quadros seguintes. Caches LRU com tamanho dinâmico (blocos
+visíveis × 1,6 + folga). Decals: `state.decals` com mais de 1500 → o render remove os 300 mais antigos (início do
+array); desbotam até 35% em ~3 dias de jogo. Partículas: teto 900 (mais antigas saem).
 
 ### O que o render espera dos outros módulos (tudo opcional — há padrões seguros)
-**Jogador** (`state.player`):
-- `x, y, dir` (rad, mundo), `alive`, `running`, `sneaking`, `aiming`, `flashlightOn`, `sleeping`.
-- `anim.state`: `'idle'|'walk'|'run'|'sneak'|'attack'|'shove'|'aim'|'shoot'|'hurt'|'climb'|'dead'|'eat'|'loot'|'sleep'`.
-  A passada (walk/run/sneak) sai do **deslocamento real** (funciona sem `anim`); `anim.state` serve para as ações.
-- `anim.swing` 0..1 = progresso do golpe/empurrão (0–0,25 preparação, 0,25–0,55 golpe, depois recuperação).
-  Se não houver `swing`, usa `anim.t` quando `anim.t <= 1`.
-- `anim.t`: segundos desde o início do estado para `shoot` (recuo some em ~0,17 s) e `hurt` (~0,33 s); para `climb`
-  é o progresso 0..1 do pulo.
-- `equipped.main.type` → tipo de arma por palavra-chave: `bat|taco`, `axe|machado`, `hatchet`, `knife|faca`,
-  `machete`, `crowbar`, `hammer|martelo`, `sledge`, `shovel|spade`, `pan|frigideira`, `golf`, `plank|tabua|board`,
-  `pipe|cano`, `wrench|chave`, `pistol|revolver|handgun|glock|magnum`, `shotgun|escopeta`, `rifle|carbine|hunting`,
-  `flashlight|lanterna|torch`. Sem casar: `G.items.def(item).cat === 'firearm'` → pistola; `cat === 'weapon'` →
-  cano (ou facão se `weapon.blade`); senão "item na mão". Duas mãos: taco, machado, pá, golfe, tábua, marreta,
-  rifle, escopeta. `equipped.back` → desenha mochila.
-- Aparência opcional `player.look = { skin, shirt, pants, hair, hairStyle 0–5, female, shoes, jacket }` (cor CSS ou
-  índice de paleta).
-**Zumbis** (`state.zombies[]`): `id` (estável — define aparência/variação), `x, y, dir`, `state` do contrato
-(`idle, wander, investigate` = trôpego; `chase` inclinado com braços à frente; `attack`/`lunge` agarrando;
-`bang` socando; `stagger`; `down`; `crawl` ou `crawler: true`; `eat` ajoelhado; `dead`), `animT` (desfasa rastejo),
-`variant = { skin, shirt, pants, hair, hairStyle, female, blood 0..1 }` (cada campo cor CSS ou índice; ausente =
-sorteado pelo `id`). Só são desenhados onde `vis > 0` (esmaecem na borda).
-**Cadáveres** `{ x, y, dir, variant, time }` (a poça cresce nos primeiros minutos de jogo após `time`). **Itens no chão**
-`{ x, y, item }` → `G.items.drawIcon(ctx, type, 0, 0, 32)` cacheado por tipo (sem `drawIcon`: marcador genérico).
-**Decals** `{ x, y, type:'blood'|'bloodpool'|'glass'|'footprint'|'bullet'|'puddle', size (tiles), rot, alpha, t }`:
-persistem, desbotam em ~3 dias de jogo até 35%, teto 1000. **Partículas** no formato do contrato (tipos também
-`'spark'`, `'shell'`, `'muzzle'`), física com gravidade e quique; sangue que cai vira mini-decal; teto 900.
-**Eventos que o render já trata** (não precisa duplicar o visual): `player:attack {firearm, dir}` → clarão, fumaça,
-cápsula, faíscas e luz do tiro; `zombie:hit {zombie, killed}` → jorro + decal; `player:hit` → sangue;
-eventos de porta/janela/barricada/cerca → invalida FOV/luzes/sprites do tile; `game:start` → reinicia caches.
-Tremor de câmera fica com quem causa (`G.camera.shake`).
-**Mundo**: `G.world.blocksSight` (FOV), `wallMask`, `building`, `rooms`, `buildings[].parts/roofType/ridgeAxis`,
-`objects[].light/power`, `roadMarks`. Mudanças estruturais fora dos eventos acima: chamar `G.fov.invalidate()`.
-**Clima/luz**: `state.weather` (rain, fog, wind, cloud, lightning, storm) e `state.time/day/power`. O render tem
-sua própria curva de luz por hora (usa `state.light` só como referência); `weather.lightning` 1→0 gera o clarão
-duplo + escurecimento breve.
+**Jogador** (`state.player`): `x, y, dir`, `alive`, `running`, `sneaking`, `aiming`, `flashlightOn`, `sleeping`;
+`anim.state` (`idle|walk|run|sneak|attack|shove|aim|shoot|hurt|climb|dead|eat|loot|sleep`), `anim.swing` 0..1 nos
+golpes, `anim.t` em `shoot/hurt/climb`; `equipped.main.type` (arma por palavra-chave, ver código) e `equipped.back`;
+aparência opcional `player.look`. A aparência é recalculada quando `equipped`/`back`/`look` mudam (hash).
+**Zumbis** (`state.zombies[]`): `id` estável, `x, y, dir`, `state` do contrato, `animT`, `variant`
+(`{ skin, shirt, pants, hair, hairStyle, female, blood }`, cada campo opcional). **Cadáveres** `{ x, y, dir, variant,
+time }`. **Itens no chão** `{ x, y, item }` → `G.items.drawIcon(ctx, type, 0, 0, 32)` (uma vez por tipo).
+**Decals** `{ x, y, type:'blood'|'bloodpool'|'glass'|'footprint'|'bullet'|'puddle', size, rot, alpha, t }`.
+**Partículas** no formato do contrato (também `'spark'|'shell'|'muzzle'`).
+**Eventos tratados**: `player:attack {firearm, dir}` (clarão/fumaça/cápsula/luz), `zombie:hit`, `player:hit`,
+`door:open|close|break`, `window:open|close|break|curtain`, `barricade:add|break|remove`, `fence:break` (FOV, luzes
+da região e sprites do tile), `game:start`. Mudança estrutural fora desses eventos: `G.fov.invalidate()` e
+`G.R.light.dirtyAt(x, y)`.
+**Mundo**: `G.world.lineOfSight/sightCost`, `wallMask`, `building`, `rooms`, `buildings[].parts/roofType/ridgeAxis/
+name/face/doors`, `lots[].kind`, `bridges`, `objects[].light { radius, color, needsPower }` (acesa só se
+`state.power` ou `!needsPower`), `roadMarks`. Letreiros usam `building.name` de lojas/serviços.
+**Clima/luz**: `state.weather` (rain, fog, wind, cloud, lightning, storm), `state.time/power`.
 
-### Desempenho (Chromium headless/SwiftShader, 1280×720, mediana do `draw()`)
-Casa inicial ≈ 7,8 ms · rua residencial de dia ≈ 6,2 ms · centro ≈ 6,0 ms · noite + tempestade + lanterna ≈ 5,9 ms ·
-floresta densa ≈ 10–11 ms (dominado pela GPU emulada). Em SwiftShader o FPS medido fica em ~14–16 porque as
-composições de tela cheia (multiply/saturation) são rasterizadas na CPU; em GPU real são baratas.
-Caches: blocos de chão (LRU 48/22), sprites de parede (LRU 380/900), sprites de objeto com orçamento por quadro,
-sombras estáticas por posição do sol, luzes estáticas recalculadas só quando algo muda.
+### Desempenho (Chromium headless + SwiftShader; cenas e scripts do revisor)
+Mediana do `draw()` em ms (antes → depois), 1280×720; entre parênteses FPS medido. "sync" = `draw()` + raster
+forçado (`getImageData`), que é o custo real no SwiftShader; o `draw()` sem sync esconde parte do raster fora dele.
+
+| cena | draw (antes → depois) | sync (antes → depois) | FPS |
+|---|---|---|---|
+| casa inicial | 8,2 → 10,9 | 67,6 → 44,3 | 15 → 21 |
+| centro | 5,9 → 10,0 | 60,7 → 41,3 | 15 → 24 |
+| floresta | 11,5 → 23,9 | 142,2 → 85,6 | 7 → 12 |
+| noite + chuva + lanterna | 5,8 → 9,6 | 57,6 → 41,8 | 16 → 24 |
+| zoom 0,6 | 74,6 → 15,1 | 78,7 → 61,7 | 13 → 16 |
+| zoom 2 | 4,1 → 19,2 | 54,4 → 38,3 | 18 → 26 |
+| horda de 40 | 10,4 → 12,2 | 70,9 → 44,9 | 13 → 20 |
+| zoom 0,6 @1920×1080 | 208 → 41 | 336 → 150 | 3 → 7 |
+
+Trabalho JS puro (perfil de CPU, sem o raster): ≈ 4–5 ms na cidade, ≈ 7,5 ms na floresta, ≈ 5 ms com 40 zumbis.
+Cruzar zoom com a roda: pior quadro 674 → 56 ms. Caminhada: pior quadro 46 → 28 ms (19 FPS contra 15). Teleporte para área nova:
+pior quadro 24 ms. Em GPU real as composições de tela cheia são baratas.
 
 ### Sugestões / pedidos
-- **Jogador**: preencher `anim.state` + `anim.swing` (0..1) nos ataques/empurrões e `anim.t` em `shoot/hurt/climb`;
-  emitir `player:attack {firearm:true, dir}` a cada tiro (o render cuida do clarão/fumaça/cápsula).
-- **Zumbis**: usar os nomes de estado do contrato; `id` estável; `variant` opcional.
-- **Itens**: `drawIcon(ctx, type, x, y, size)` deve desenhar dentro do quadrado (x, y, size×size) — o render chama
-  com (0, 0, 32) num canvas 32×32 e guarda o resultado por tipo (chamado uma vez por tipo).
-- Futuro: menos sobreposição de copas na floresta; textura animada para a névoa do "nunca visto"; reflexos nas poças.
+- **Zumbis (IA)**: detecção por `G.world.lineOfSight` e distância escalada por `G.render.lightAt` no jogador.
+- **Jogador**: `anim.state` + `anim.swing` nos ataques; `player:attack {firearm:true, dir}` a cada tiro.
+- **Itens**: `drawIcon(ctx, type, x, y, size)` desenhando dentro do quadrado pedido.
+- **Mundo**: emitir evento (ou chamar `G.R.light.dirtyAt`) se luzes/`power` mudarem por outros meios.

@@ -1,10 +1,11 @@
 /* =====================================================================
  * VALE QUIETO — render-fx.js  (Etapa 2: Render)
- * Efeitos: sombras do sol (camada única em meia resolução), partículas
- * (state.particles: física simples), decals no chão (sangue, poças, vidro,
- * pegadas, tiros), poças e brilho do chão molhado, chuva com vento e
- * respingos, neblina em camadas, folhas ao vento, relâmpago, correção de
- * cor por hora, vinheta e grão de filme.
+ * Efeitos: sombras do sol (estáticas em blocos com orçamento + dinâmicas em
+ * meia resolução, cor azulada), partículas (state.particles: física
+ * simples), decals no chão (sangue, poças, vidro, pegadas, tiros), poças do
+ * chão molhado, chuva com vento e respingos (só fora dos prédios), neblina
+ * em camadas, folhas ao vento, clarão do relâmpago, e as texturas de
+ * vinheta/grão que render.js multiplica junto com o mapa de luz.
  * ===================================================================== */
 (function () {
   'use strict';
@@ -12,6 +13,9 @@
   const FX = (R.fx = {});
   const ZPX = R.ZPX;
   const rnd = Math.random;
+  const TUNE = R.TUNE;
+  const SH_CW = 1024, SH_CH = 512; // bloco de sombras estáticas (px isométricos), canvas em meia resolução
+  const shadowCss = 'rgb(' + TUNE.shadowTint.join(',') + ')';
 
   // ------------------------------------------------------------------
   // Sombras do sol: tudo num único caminho, preenchido de uma vez
@@ -27,7 +31,6 @@
     shX.beginPath();
     return shX;
   };
-  FX.shadowCtx = () => shX;
   // Todos os sub-caminhos com a MESMA orientação (preenchimento nonzero soma, não cancela)
   let ovx = 0, ovy = 0; // deslocamento da sombra por metro de altura, em px isométricos
   FX.shadowPrep = function () {
@@ -71,25 +74,25 @@
     shX.moveTo(X + vx + 5, Y + vy); shX.ellipse(X + vx, Y + vy, 5, 3, 0, 0, Math.PI * 2);
   };
   // ---- sombras estáticas em cache por bloco (reconstruídas quando o sol anda) ----
-  const shChunks = new Map();
+  const shChunks = new R.Cache(40);
   let shMap = null, shFrame = 0;
   FX.shadowReset = function (m) { shMap = m; shChunks.clear(); };
   function sunKey() {
     const e = R.light.env;
-    return Math.round(Math.atan2(e.sunY, e.sunX) * 60) + ':' + Math.round(Math.min(e.sunLen, 3.4) * 16);
+    return Math.round(Math.atan2(e.sunY, e.sunX) * 60) + ':' + Math.round(e.sunLen * 16);
   }
   const W = G.WALL;
   function casterH(wv) { return wv === W.HEDGE ? 1.35 : wv === W.FENCE_WOOD || wv === W.FENCE_GATE ? 1.25 : wv === W.FENCE_METAL ? 0.2 : R.WALL_M; }
   function buildShadowChunk(cx, cy) {
-    const m = shMap, CW = R.ground.CW, CH = R.ground.CH;
+    const m = shMap, CW = SH_CW, CH = SH_CH;
     const c = R.canvas(CW / 2, CH / 2);
-    const g = c.getContext('2d');
+    const g = c.getContext('2d', { willReadFrequently: true });
     const X0 = cx * CW, Y0 = cy * CH;
     const saved = shX; shX = g;
     g.setTransform(0.5, 0, 0, 0.5, -X0 * 0.5, -Y0 * 0.5);
     g.beginPath();
     const e = R.light.env;
-    const L = Math.min(e.sunLen, 3.4);
+    const L = e.sunLen; // já limitado em R.light (≤ 5)
     // tiles do bloco + margem a montante da sombra
     const u0 = Math.floor(X0 / 32) - 2, u1 = Math.ceil((X0 + CW) / 32) + 2, v0 = Math.floor(Y0 / 16) - 2, v1 = Math.ceil((Y0 + CH) / 16) + 4;
     let xa = Math.floor((u0 + v0) / 2), xb = Math.ceil((u1 + v1) / 2), ya = Math.floor((v0 - u1) / 2), yb = Math.ceil((v1 - u0) / 2);
@@ -132,7 +135,7 @@
       const o = m.objects[oi];
       if (o.building) continue;
       const t = o.type;
-      if (t === 'tree') FX.shadowTree(o.x + 0.5, o.y + 0.5, 4.3, 1.35, 3);
+      if (t === 'tree') FX.shadowTree(o.x + 0.5, o.y + 0.5, 3.8, 1.5, 2.6);
       else if (t === 'pine') { FX.shadowTree(o.x + 0.5, o.y + 0.5, 3.0, 0.95, 1.4); FX.shadowTree(o.x + 0.5, o.y + 0.5, 5.4, 0.5, 0.1); }
       else if (t === 'bush') FX.shadowTree(o.x + 0.5, o.y + 0.5, 0.4, 0.42, 0.1);
       else if (t === 'lamp_post') FX.shadowSeg(o.x + 0.45, o.y + 0.55, o.x + 0.55, o.y + 0.45, 3.9);
@@ -144,7 +147,7 @@
         FX.shadowBox(o.x + ins, o.y + ins, o.x + o.w - ins, o.y + o.h - ins, h);
       }
     }
-    g.fillStyle = '#000';
+    g.fillStyle = shadowCss;
     g.fill('nonzero');
     // interiores (sob telhado) não recebem sol
     g.globalCompositeOperation = 'destination-out';
@@ -160,35 +163,33 @@
     shX = saved;
     return c;
   }
-  // Desenha as sombras estáticas visíveis no canvas de sombras (já iniciado com shadowBegin)
-  FX.drawStaticShadows = function (view, target) {
+  // Desenha as sombras estáticas visíveis (blocos em cache por posição do sol). Blocos que faltam
+  // ou estão velhos (o sol andou) são (re)construídos dentro do orçamento; um bloco velho continua
+  // sendo usado até ser refeito; um que falta simplesmente não aparece neste quadro.
+  FX.drawStaticShadows = function (view, target, budget) {
     if (!shMap) return;
     shFrame++;
-    const CW = R.ground.CW, CH = R.ground.CH, m = shMap;
+    const CW = SH_CW, CH = SH_CH, m = shMap;
     const key = sunKey();
     const mapX0 = -m.h * 32, mapX1 = m.w * 32, mapY1 = (m.w + m.h) * 16;
     const cx0 = Math.floor(Math.max(view.X0, mapX0) / CW), cx1 = Math.floor(Math.min(view.X1, mapX1) / CW);
     const cy0 = Math.floor(Math.max(view.Y0, 0) / CH), cy1 = Math.floor(Math.min(view.Y1, mapY1) / CH);
-    let rebuilt = 0;
-    const saved = target || shX;
+    const t0 = performance.now();
+    let built = 0;
+    shChunks.max = Math.max(24, (cx1 - cx0 + 1) * (cy1 - cy0 + 1) * 2 + 6);
     for (let cy = cy0; cy <= cy1; cy++) for (let cx = cx0; cx <= cx1; cx++) {
       const k = cy * 8192 + cx + 4096;
       let ch = shChunks.get(k);
-      if (!ch || (ch.key !== key && rebuilt < 2)) {
-        ch = { c: buildShadowChunk(cx, cy), key, cx, cy, used: shFrame };
+      if ((!ch || ch.key !== key) && (budget === Infinity || (performance.now() - t0 < budget && built < (ch ? 1 : 2)))) {
+        ch = { c: buildShadowChunk(cx, cy), key, cx, cy };
         shChunks.set(k, ch);
-        rebuilt++;
+        built++;
       }
-      ch.used = shFrame;
-      saved.drawImage(ch.c, cx * CW, cy * CH, CW, CH);
-    }
-    if (shChunks.size > 60) {
-      const arr = [...shChunks.entries()].sort((a, b) => a[1].used - b[1].used);
-      for (let k = 0; k < arr.length - 50; k++) shChunks.delete(arr[k][0]);
+      if (ch) target.drawImage(ch.c, cx * CW, cy * CH, CW, CH);
     }
   };
   FX.shadowEnd = function (ctx, alpha, cutouts) {
-    shX.fillStyle = '#000';
+    shX.fillStyle = shadowCss;
     shX.fill('nonzero');
     shX.globalCompositeOperation = 'source-over';
     if (cutouts && cutouts.length) {
@@ -264,18 +265,18 @@
     decalSpr.set(key, c);
     return c;
   }
+  // Limite: 1500 decals; ao passar, os 300 mais antigos (início do array) saem.
+  FX.DECAL_MAX = 1500;
   FX.drawDecals = function (ctx, s, view, zoomT) {
     const ds = s.decals;
     if (!ds || !ds.length) return;
-    if (ds.length > 1200) ds.splice(0, ds.length - 1000);
-    const seen = R.light.seen(), m = s.map;
+    if (ds.length > FX.DECAL_MAX) ds.splice(0, ds.length - FX.DECAL_MAX + 300);
     const now = s.time;
     for (let k = 0; k < ds.length; k++) {
       const d = ds[k];
+      if (!d || !(d.x === d.x) || !(d.y === d.y)) continue;
       const X = (d.x - d.y) * 32, Y = (d.x + d.y) * 16;
       if (X < view.X0 - 64 || X > view.X1 + 64 || Y < view.Y0 - 40 || Y > view.Y1 + 40) continue;
-      const tx = Math.floor(d.x), ty = Math.floor(d.y);
-      if (seen && tx >= 0 && ty >= 0 && tx < m.w && ty < m.h && !seen[ty * m.w + tx] && R.light.opts.fov) continue;
       const age = Math.max(0, now - (d.t || 0));
       const a = (d.alpha != null ? d.alpha : 0.9) * Math.max(0.35, 1 - age / 4320);
       const v = (((d.x * 7919 + d.y * 104729) | 0) & 7);
@@ -298,7 +299,6 @@
     const m = s.map;
     const a0 = U.smoothstep(0.25, 0.8, e.wet);
     const spr = decalSprite('puddle', 3), spr2 = decalSprite('puddle', 5);
-    const sky = 'rgba(' + Math.round(150 + 80 * e.lum) + ',' + Math.round(165 + 70 * e.lum) + ',' + Math.round(185 + 60 * e.lum) + ',';
     for (let k = 0; k < n; k++) {
       const i = tiles[k];
       const x = i % m.w, y = (i / m.w) | 0;
@@ -315,18 +315,19 @@
       ctx.drawImage(h < 0.04 ? spr : spr2, -32, -32);
     }
     ctx.globalAlpha = 1;
-    void sky;
   };
 
   // ------------------------------------------------------------------
   // Partículas
   // ------------------------------------------------------------------
+  const landed = new WeakSet(); // gotas de sangue que já viraram mancha (sem escrever na partícula)
   FX.updateParticles = function (s, dt) {
     const ps = s.particles;
     if (!ps || !ps.length) return;
     let n = ps.length;
     for (let k = 0; k < n; k++) {
       const p = ps[k];
+      if (!p) { ps[k] = ps[n - 1]; n--; k--; continue; }
       p.life -= dt;
       if (!(p.life > 0)) { ps[k] = ps[n - 1]; n--; k--; continue; }
       const t = p.type;
@@ -338,8 +339,8 @@
       if (p.z < 0) {
         p.z = 0;
         if (t === 'blood') {
-          if (!p._landed && s.decals && rnd() < 0.35) s.decals.push({ x: p.x, y: p.y, type: 'blood', size: 0.12 + rnd() * 0.12, rot: rnd() * 6.28, alpha: 0.85, t: s.time });
-          p._landed = true; p.life = Math.min(p.life, 0.05);
+          if (!landed.has(p) && s.decals && rnd() < 0.35) s.decals.push({ x: p.x, y: p.y, type: 'blood', size: 0.12 + rnd() * 0.12, rot: rnd() * 6.28, alpha: 0.85, t: s.time });
+          landed.add(p); p.life = Math.min(p.life, 0.05);
         } else if (t === 'shell' || t === 'glass' || t === 'wood' || t === 'spark') {
           p.vz = -p.vz * 0.35; p.vx *= 0.5; p.vy *= 0.5;
           if (t === 'spark') p.life = Math.min(p.life, 0.08);
@@ -401,9 +402,10 @@
     const wind = 0.25 + e.wind * 0.9;
     ctx.save();
     ctx.setTransform(1, 0, 0, 1, 0, 0);
-    if (exclude && exclude.length > 4) {
+    // interiores: cada polígono vira um "buraco" (um clip por polígono → união dos buracos)
+    if (exclude) for (const poly of exclude) {
       ctx.beginPath(); ctx.rect(0, 0, W, H);
-      ctx.moveTo(exclude[0], exclude[1]); for (let k = 2; k < exclude.length; k += 2) ctx.lineTo(exclude[k], exclude[k + 1]); ctx.closePath();
+      ctx.moveTo(poly[0], poly[1]); for (let k = 2; k < poly.length; k += 2) ctx.lineTo(poly[k], poly[k + 1]); ctx.closePath();
       ctx.clip('evenodd');
     }
     if (n > 0) {
@@ -495,82 +497,88 @@
     }
     g.putImageData(img, 0, 0);
   }
+  // gradiente radial da névoa: criado em (0,0) e reaproveitado enquanto os parâmetros (quantizados) não mudam
+  let fogGrad = null, fogKey = '';
   FX.drawFog = function (ctx, W, H, cam, px, py) {
     const e = R.light.env;
     const f = e.fog;
     if (f + e.rain * 0.25 < 0.12) return;
     const fc = e.fogCol;
-    const col = 'rgb(' + fc[0] + ',' + fc[1] + ',' + fc[2] + ')';
     ctx.save();
-    ctx.setTransform(1, 0, 0, 1, 0, 0);
     // névoa por distância ao jogador
-    const amt = Math.min(1, f * 1.05 + e.rain * 0.25);
-    const r0 = (1 - amt) * 480 * cam.zoom + 110 * cam.zoom, r1 = r0 + 520 * cam.zoom * (1.2 - amt * 0.5);
-    const g = ctx.createRadialGradient(px, py, r0 * 0.2, px, py, r1);
-    g.addColorStop(0, 'rgba(' + fc[0] + ',' + fc[1] + ',' + fc[2] + ',0)');
-    g.addColorStop(0.35, 'rgba(' + fc[0] + ',' + fc[1] + ',' + fc[2] + ',' + (amt * 0.18).toFixed(3) + ')');
-    g.addColorStop(1, 'rgba(' + fc[0] + ',' + fc[1] + ',' + fc[2] + ',' + (amt * 0.92).toFixed(3) + ')');
-    ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
-    // camadas em movimento
-    if (!fogTex) makeFog();
-    if (!fogPat) fogPat = ctx.createPattern(fogTex, 'repeat');
-    ctx.globalCompositeOperation = 'source-over';
-    for (let L = 0; L < (f > 0.25 ? 2 : 0); L++) {
-      const sc = (L ? 5.5 : 3.8) * cam.zoom;
-      const sp = (L ? 9 : 5) * (0.4 + e.wind);
-      const ox = -((cam.ox * (L ? 0.9 : 0.7) + e.t * sp * 3) % (256 * sc)), oy = -((cam.oy * (L ? 0.9 : 0.7) + e.t * sp) % (256 * sc));
-      ctx.globalAlpha = f * (L ? 0.26 : 0.34);
-      ctx.setTransform(sc, 0, 0, sc, ox, oy);
-      ctx.fillStyle = fogPat;
-      ctx.fillRect(-256, -256, W / sc + 512, H / sc + 512);
+    const amt = Math.round(Math.min(1, f * 1.05 + e.rain * 0.25) * 40) / 40;
+    const r0 = Math.round((1 - amt) * 480 * cam.zoom + 110 * cam.zoom), r1 = Math.round(r0 + 520 * cam.zoom * (1.2 - amt * 0.5));
+    const key = fc[0] + ',' + fc[1] + ',' + fc[2] + '|' + amt + '|' + r0 + '|' + r1;
+    if (key !== fogKey) {
+      fogKey = key;
+      fogGrad = ctx.createRadialGradient(0, 0, r0 * 0.2, 0, 0, r1);
+      fogGrad.addColorStop(0, 'rgba(' + fc[0] + ',' + fc[1] + ',' + fc[2] + ',0)');
+      fogGrad.addColorStop(0.35, 'rgba(' + fc[0] + ',' + fc[1] + ',' + fc[2] + ',' + (amt * 0.18).toFixed(3) + ')');
+      fogGrad.addColorStop(1, 'rgba(' + fc[0] + ',' + fc[1] + ',' + fc[2] + ',' + (amt * 0.92).toFixed(3) + ')');
     }
-    // tinge as camadas com a cor da névoa (multiplica o branco pelo tom)
-    ctx.restore();
+    ctx.setTransform(1, 0, 0, 1, px, py);
+    ctx.fillStyle = fogGrad; ctx.fillRect(-px, -py, W, H);
+    // camadas em movimento (só em neblina de verdade)
     if (f > 0.25) {
-      ctx.save(); ctx.setTransform(1, 0, 0, 1, 0, 0);
+      if (!fogTex) makeFog();
+      if (!fogPat) fogPat = ctx.createPattern(fogTex, 'repeat');
+      ctx.globalCompositeOperation = 'source-over';
+      for (let L = 0; L < 2; L++) {
+        const sc = (L ? 5.5 : 3.8) * cam.zoom;
+        const sp = (L ? 9 : 5) * (0.4 + e.wind);
+        const ox = -((cam.ox * (L ? 0.9 : 0.7) + e.t * sp * 3) % (256 * sc)), oy = -((cam.oy * (L ? 0.9 : 0.7) + e.t * sp) % (256 * sc));
+        ctx.globalAlpha = f * (L ? 0.26 : 0.34);
+        ctx.setTransform(sc, 0, 0, sc, ox, oy);
+        ctx.fillStyle = fogPat;
+        ctx.fillRect(-256, -256, W / sc + 512, H / sc + 512);
+      }
+      // tinge as camadas com a cor da névoa
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
       ctx.globalCompositeOperation = 'multiply';
       ctx.globalAlpha = f * 0.35;
-      ctx.fillStyle = col; ctx.fillRect(0, 0, W, H);
-      ctx.restore();
+      ctx.fillStyle = 'rgb(' + fc[0] + ',' + fc[1] + ',' + fc[2] + ')'; ctx.fillRect(0, 0, W, H);
     }
+    ctx.restore();
   };
 
   // ------------------------------------------------------------------
-  // Pós-processamento
+  // Pós: vinheta e grão entram no MESMO multiply do mapa de luz (render.js);
+  // aqui só o clarão do relâmpago (aditivo, dois pulsos).
   // ------------------------------------------------------------------
-  let vig = null, vigW = 0, vigH = 0, grain = null, grainPat = null;
-  FX.post = function (ctx, W, H, s) {
+  let vig = null, vigW = 0, vigH = 0, grain = null;
+  // vinheta (tamanho do canvas de luz, meia resolução): 1 no centro → (1 − TUNE.vignette) nos cantos
+  FX.vignette = function (w, h) {
+    if (vig && vigW === w && vigH === h) return vig;
+    vigW = w; vigH = h; vig = R.canvas(w, h);
+    const g = vig.getContext('2d');
+    const k = 1 - TUNE.vignette, m1 = Math.round(255 * (1 - TUNE.vignette * 0.3)), m2 = Math.round(255 * k);
+    const gr = g.createRadialGradient(w / 2, h / 2, Math.min(w, h) * 0.36, w / 2, h / 2, Math.hypot(w, h) * 0.56);
+    gr.addColorStop(0, 'rgb(255,255,255)'); gr.addColorStop(0.6, 'rgb(' + m1 + ',' + m1 + ',' + m1 + ')'); gr.addColorStop(1, 'rgb(' + m2 + ',' + m2 + ',' + m2 + ')');
+    g.fillStyle = gr; g.fillRect(0, 0, w, h);
+    return vig;
+  };
+  // grão multiplicativo: quase branco com pontinhos escuros → some no escuro, aparece nas luzes
+  FX.grain = function () {
+    if (grain) return grain;
+    grain = R.canvas(96, 96);
+    const g = grain.getContext('2d'), img = g.createImageData(96, 96), d = img.data;
+    for (let p = 0; p < d.length; p += 4) {
+      const v = rnd();
+      const k = 255 - Math.round(Math.pow(v, 6) * TUNE.grain * 255 * 2.2);
+      d[p] = d[p + 1] = d[p + 2] = k; d[p + 3] = 255;
+    }
+    g.putImageData(img, 0, 0);
+    return grain;
+  };
+  FX.post = function (ctx, W, H) {
     const e = R.light.env;
+    if (e.flash <= 0.02) return;
     ctx.save();
     ctx.setTransform(1, 0, 0, 1, 0, 0);
-    // relâmpago: clarão branco-azulado
-    if (e.flash > 0.02) { ctx.globalCompositeOperation = 'screen'; ctx.fillStyle = 'rgba(180,195,255,' + Math.min(0.5, e.flash * 0.32).toFixed(3) + ')'; ctx.fillRect(0, 0, W, H); }
-    // (a correção de cor por hora já está embutida na paleta de luz ambiente — render-light.js)
-    // vinheta
-    if (!vig || vigW !== W || vigH !== H) {
-      vigW = W; vigH = H; vig = R.canvas(W, H);
-      const g = vig.getContext('2d');
-      const gr = g.createRadialGradient(W / 2, H / 2, Math.min(W, H) * 0.35, W / 2, H / 2, Math.hypot(W, H) * 0.56);
-      gr.addColorStop(0, 'rgba(0,0,0,0)'); gr.addColorStop(0.6, 'rgba(0,0,0,0.18)'); gr.addColorStop(1, 'rgba(0,0,0,0.62)');
-      g.fillStyle = gr; g.fillRect(0, 0, W, H);
-    }
-    ctx.globalCompositeOperation = 'source-over';
-    ctx.globalAlpha = 0.75 + e.night * 0.25;
-    ctx.drawImage(vig, 0, 0);
-    // grão
-    if (!grain) {
-      // grão: pontinhos claros e escuros quase transparentes (source-over é barato)
-      grain = R.canvas(128, 128);
-      const g = grain.getContext('2d'), img = g.createImageData(128, 128), d = img.data;
-      for (let p = 0; p < d.length; p += 4) { const v = rnd(); const b = v < 0.5 ? 0 : 255; d[p] = d[p + 1] = d[p + 2] = b; d[p + 3] = (Math.abs(v - 0.5) * 2) ** 3 * 44; }
-      g.putImageData(img, 0, 0);
-      grainPat = ctx.createPattern(grain, 'repeat');
-    }
-    ctx.globalCompositeOperation = 'source-over';
-    ctx.globalAlpha = 0.4 + e.night * 0.35;
-    ctx.translate((rnd() * 128) | 0, (rnd() * 128) | 0);
-    ctx.fillStyle = grainPat;
-    ctx.fillRect(-128, -128, W + 256, H + 256);
+    // relâmpago: clarão branco-azulado aditivo (pico ~TUNE.lightning)
+    ctx.globalCompositeOperation = 'lighter';
+    ctx.fillStyle = 'rgba(170,185,235,' + Math.min(1, e.flash * TUNE.lightning).toFixed(3) + ')';
+    ctx.fillRect(0, 0, W, H);
     ctx.restore();
   };
 })();
