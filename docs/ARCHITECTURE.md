@@ -41,7 +41,7 @@ Parâmetros de URL: `autostart=1` (pula o título), `seed`, `hour`, `debug=1`, `
   no centro do losango. Entidades são desenhadas com os pés em `toScreen(e.x,e.y)`.
 - `G.iso.screenDirToWorld(dx,dy)` converte direção de tela (WASD) em direção de mundo.
 - Direções (`dir`) são ângulos em radianos no **espaço do mundo** (`atan2(dy,dx)`).
-- `G.CONST`: `TILE_W=64, TILE_H=32, WALL_H=80, MAP_W=MAP_H=140, MINUTES_PER_SECOND=1, START_HOUR=9`.
+- `G.CONST`: `TILE_W=64, TILE_H=32, WALL_H=80, MAP_W=MAP_H=180, MINUTES_PER_SECOND=1, START_HOUR=9`.
 - Profundidade (ordem de desenho): ordenar por `x + y` (maior = mais à frente).
 
 ## Estado global — `G.state` (criado por `G.main.newGame`)
@@ -84,36 +84,79 @@ Arrays planos indexados por `i = ty * w + tx`.
 | `building` | Uint16Array | 0 = exterior; senão id do prédio (tile coberto por teto) |
 | `room` | Uint16Array | 0 = nenhum; senão id do cômodo |
 | `objAt` | Int32Array | −1 ou índice em `objects` (todas as células da pegada do objeto) |
-| `buildings` | array | `{ id, x, y, w, h, type, name, roofColor, wallColor, wall, doors:[{x,y}] }` |
-| `rooms` | array | `{ id, building, type, x, y, w, h }` tipos: `kitchen, bedroom, bathroom, living, garage, hall, store, storage, office, pharmacy, police, gas_station, diner, church, warehouse` |
-| `objects` | array | `{ id, type, x, y, w, h, rot, blocksMove, blocksSight, height, container, light, variant }` |
-| `spawnPoint` | `{x,y}` | dentro de uma casa segura |
-| `zombieSpawns` | array | `{x,y,weight}` pontos/áreas de densidade |
+| `buildings` | array | `{ id, x, y, w, h, type, name, roofColor, wallColor, wall, doors:[{x,y}], parts, roofType, ridgeAxis, face, floorColor, lot, start? }` (ver abaixo) |
+| `rooms` | array | `{ id, building, type, x, y, w, h, loot }` tipos: `kitchen, bedroom, bathroom, living, garage, hall, store, storage, office, pharmacy, police, gas_station, diner, church, warehouse` |
+| `objects` | array | `{ id, type, x, y, w, h, rot, blocksMove, blocksSight, height, container, light, variant, building, room }` |
+| `spawnPoint` | `{x,y}` | dentro de uma casa segura (prédio com `start: true`) |
+| `zombieSpawns` | array | `{x,y,weight,group}` pontos em grupos (hotspots); `group` agrupa pontos vizinhos |
+| `wallMask` | Uint8Array | conexões de cada tile de parede/porta/janela/cerca com os vizinhos: bits `1=N(-y) 2=E(+x) 4=S(+y) 8=W(-x)`. Paredes de prédio ligam com tiles de parede do **mesmo prédio** (inclui grades internas); cercas/sebes/portões ligam com cercas e com paredes. O render desenha paredes **finas** (estilo PZ) ao longo desses eixos |
+| `barricadeHp` | Float32Array | vida total da barricada do tile (30 por tábua) |
+| `roadMarks` | array | marcas finas em coordenadas de mundo (floats): `{x0,y0,x1,y1,type}` tipos `center_dashed` (rua principal/rurais), `center_solid` (rodovia na cidade), `crosswalk` (faixa de pedestre: segmento central de uma faixa de ~1 tile), `stop` (linha de parada), `parking` (divisória de vaga), `rail` (eixo dos trilhos), `court` (quadra). Ruas residenciais (4 de largura) não têm faixa central. O piso das ruas é sempre `ASPHALT` (`ROAD_LINE` não é mais usado) |
+| `bridges` | array | `{x,y,w,h}` retângulos de ponte (asfalto sobre água: desenhe água por baixo/guarda-corpo) |
+| `roads`, `lots`, `pois`, `lake`, `layout`, `seed`, `genTime`, `initialDecals` | — | metadados da geração (depuração/minimapa) |
 
 `container` de objeto: `{ name, items: [], capacity (kg), searched: false, lootKey }` ou `null`.
+`lootKey` = `"<etiqueta>:<tipo do objeto>"` (ex.: `kitchen:fridge`, `police_armory:gun_locker`); na casa inicial vem
+prefixada com `start_` (`start_kitchen:fridge`). Lista de etiquetas em `docs/NOTES.md`.
+
+Prédios (dados para o render): `parts = [{x,y,w,h,ridgeAxis}]` são os retângulos reais da pegada (casas em L têm 2–3),
+`roofType: 'gable'|'hip'|'flat'`, `ridgeAxis: 'x'|'y'` (cumeeira da parte principal), `face: 'N'|'S'|'E'|'W'`
+(para onde a frente aponta), `floorColor` opcional. Paredes do prédio têm `building` preenchido (o telhado cobre tudo).
+
+Pisos novos: `G.FLOOR.DOCK=15` (píer/pontilhão de madeira sobre água — desenhe água por baixo), `PORCH=16` (varanda),
+`POOL=17` (piscina; bloqueia andar como água). Parede nova: `G.WALL.FENCE_GATE=12` (portão de cerca: abre/fecha/tranca
+como porta, não bloqueia visão, dá para pular).
+
+Objetos: `rot` = direção para onde a frente aponta (`0:+x 1:+y 2:-x 3:-y`); `height` = altura visual relativa à parede.
+**Veículos** (`rot` = sentido do capô; pegada comprimento×largura ao longo do `rot`): `car` 4×2, `pickup` 4×2,
+`police_car` 4×2, `ambulance` 5×2 — ou seja, `w×h = 4×2` com `rot` par e `2×4` com `rot` ímpar (ambulância 5×2 / 2×5).
+Garagens de casa têm interior ≥ 4×6 e portão de 3 tiles.
 `light` de objeto (postes, luminárias): `{ radius, color, needsPower: true }` ou `null`.
 Tipos de objeto (render desenha todos): `bed, double_bed, sofa, armchair, table, chair, counter, kitchen_counter,
 fridge, stove, sink, toilet, bathtub, shower, wardrobe, dresser, bookshelf, tv, desk, shelf, cash_register,
 crate, trash_can, dumpster, car, tree, pine, bush, rock, lamp_post, mailbox, bench, fuel_pump,
 washing_machine, workbench, barrel, log_pile, lamp, plant, rug, fence_gate, picnic_table, swing, grave,
-police_car, ambulance, locker, gun_locker, medicine_cabinet, vending_machine, freezer, pallet, tire`.
+police_car, ambulance, locker, gun_locker, medicine_cabinet, vending_machine, freezer, pallet, tire,
+pickup, grill, clothesline, watchtower, fountain` (os 5 últimos entraram na Etapa 1; `fence_gate` objeto é legado —
+portões agora são `G.WALL.FENCE_GATE`).
 
 ### API `G.world`
 - `generate(seed)` → map
 - `idx(tx,ty)`, `inBounds(tx,ty)`
-- `isBlocked(tx,ty, who)` — `who`: `'player'|'zombie'`. Paredes, portas fechadas, janelas (sempre bloqueiam andar;
-  atravessa-se com ação "pular"), objetos `blocksMove`, água.
+- Todas as funções que recebem tile aceitam floats (aplicam `Math.floor`).
+- `isBlocked(tx,ty, who)` — `who`: `'player'|'zombie'`. Paredes, portas/portões fechados, janelas (sempre bloqueiam andar;
+  atravessa-se com ação "pular"), cercas/sebes inteiras, objetos `blocksMove`, água e piscina.
 - `blocksSight(tx,ty)` — paredes, portas fechadas, janelas com cortina/barricada alta, objetos `blocksSight`.
-- `lineOfSight(x0,y0,x1,y1)` → bool (percurso em grade; ignora o tile de origem).
-- `moveEntity(e, dx, dy, radius, who)` → `{hitX, hitY, tx, ty}` — move com colisão círculo×tiles e desliza nas paredes.
+  Sebe é parcial: `blocksSight` = false, mas `lineOfSight` bloqueia após 2 tiles de sebe; `sightCost(tx,ty)` → 0..1.
+- `lineOfSight(x0,y0,x1,y1, ignoreDest)` → bool (DDA; ignora o tile de origem e **testa o de destino**, a menos que
+  `ignoreDest`; quina exata só bloqueia se os dois vizinhos bloqueiam; NaN → false).
+  `canReach(x0,y0,x1,y1)` = alcance físico (móveis não bloqueiam; destino não conta).
+- `moveEntity(e, dx, dy, radius, who)` → `{hitX, hitY, tx, ty}` (objeto **reutilizado**) — move com colisão círculo×tiles
+  e desliza nas paredes; subdivide passos grandes; entidade presa num tile bloqueado vai para `nearestFree`.
 - `isIndoors(x,y)` → id do prédio ou 0. `roomAt(x,y)` → room|null.
 - `getObject(tx,ty)` → objeto|null. `objectsNear(x,y,r)`.
 - `containersNear(x,y,r)` → `[{ source:'object'|'corpse'|'ground', obj, container, x, y }]` inclui cadáveres e o chão.
-- `getStructure(tx,ty)` → `{ type, open, broken, locked, barricade, hp, curtain }` ou null.
-- `setOpen(tx,ty,open)` → bool (emite `door:open/close`, `window:open`). Trancada → `door:locked`, false.
-- `damageStructure(tx,ty,amount,who)` → `'none'|'damaged'|'broken'` (barricada absorve primeiro; emite eventos).
-- `addBarricade(tx,ty)`, `removeBarricade(tx,ty)`, `breakWindow(tx,ty)`, `toggleCurtain(tx,ty)`.
-- `findPath(x0,y0,x1,y1, who, maxNodes)` → `[{x,y}]` centros de tiles, ou null (A* 8-direções, sem cortar quinas).
+- **Mover itens (jeito certo)**: `takeFrom(entry, item)`, `putInto(entry, item)` (respeita `capacity` em kg) e
+  `transferItem(from, to, item)` (não perde nem duplica; emite `item:transfer`). `entry` é uma entrada de `containersNear`
+  (`object`/`corpse`/`ground`) **ou** um contêiner simples `{items, capacity}` (ex.: inventário). O "Chão" é virtual:
+  nunca faça `splice` direto em `container.items` dele. Auxiliares: `dropItem(x,y,item)`, `removeGroundItem(item)`.
+- `getStructure(tx,ty)` → `{ type:'door'|'garage_door'|'gate'|'window'|'glass'|'fence'|'hedge'|'wall', open, broken,
+  locked, barricade, hp, barricadeHp, curtain, building, axis, group }` ou null.
+- `structureGroup(tx,ty)` → `[{x,y}]` tiles que agem juntos (portão de garagem de 3 tiles; demais = o próprio tile).
+  Abrir/fechar/trancar/dano/barricada no portão de garagem valem para o grupo inteiro, com **um** evento.
+- `wallAxis(tx,ty)` → `'x'|'y'|null` eixo da parede em que a porta/janela está. `updateWallMask(tx,ty)`.
+- `setOpen(tx,ty,open)` → bool (emite `door:open/close` — com `{garage, group}` ou `{gate}` quando for o caso —,
+  `window:open/close`). Trancada → `door:locked` ou `window:locked`, false. Barricada → false.
+- `setLocked(tx,ty,locked)` → bool (só fechadas: aberta e trancada são exclusivos).
+- `damageStructure(tx,ty,amount,who)` → `'none'|'damaged'|'broken'`. A barricada absorve primeiro (a sobra **não** passa
+  para a porta), um `barricade:break` por tábua perdida; `'broken'` = a porta/janela/cerca em si quebrou (hp 0, sem tranca).
+- `addBarricade(tx,ty)` (+30 de vida, máx. 4 tábuas; não "cura"), `removeBarricade(tx,ty)`, `breakWindow(tx,ty)`,
+  `toggleCurtain(tx,ty)`, `canClimb(tx,ty)`, `climbTarget(tx,ty,fromX,fromY)` → `{x,y}` do outro lado.
+- `findPath(x0,y0,x1,y1, who, maxNodes, opts)` → `[{x,y}]` centros de tiles, ou null (A* 8-direções, sem cortar quinas).
+  `who`: `'player'` (abre portas destrancadas), `'zombie'` (portas/janelas/cercas/barricadas passáveis com custo — ao
+  chegar, bata com `damageStructure` ou pule), `'open'` (todas as portas abertas). `opts.partial` → caminho até o nó mais
+  próximo do alvo quando não houver caminho completo.
+- `pickZombieSpawn(rng)` (sorteio por peso), `nearestFree(x,y,r)`, `buildingAt(x,y)`, `setMap(m)`, `current()`.
 - `update(dt, dtMin)`.
 
 ## Itens — `G.items` (dono: `items.js`)
@@ -223,9 +266,10 @@ Instância: `{ uid, type, cond (0..1 durabilidade), qty (munição/uso), uses (p
 | `zombie:hit` | `{zombie, damage, killed, weapon}` |
 | `zombie:death` | `{zombie}` |
 | `zombie:thump` | `{x,y}` (batendo em porta/janela/barricada) |
-| `door:open` `door:close` `door:locked` `door:break` | `{x,y}` |
-| `window:open` `window:break` `window:climb` | `{x,y}` |
-| `barricade:add` `barricade:break` | `{x,y}` |
+| `door:open` `door:close` `door:locked` `door:break` | `{x,y}` (+ `garage, group` no portão de garagem, `gate` no portão de cerca) |
+| `window:open` `window:close` `window:locked` `window:break` `window:climb` | `{x,y}` |
+| `barricade:add` `barricade:break` `barricade:remove` | `{x,y}` (um `barricade:break` por tábua) |
+| `fence:break` | `{x,y}` |
 | `item:pickup` `item:drop` `item:transfer` | `{item}` |
 | `container:open` | `{container, obj}` |
 | `craft` | `{recipe}` |

@@ -31,7 +31,7 @@
 (function () {
   const G = window.G, F = G.FLOOR, W = G.WALL, WS = G.WS;
   const P = G.params;
-  const S = +(P.scale || 6);
+  const S = +(P.scale || 5);
   const $ = (id) => document.getElementById(id);
   $('seed').value = P.seed != null ? P.seed : 1337;
   $('roofs').checked = P.roofs === '1';
@@ -43,15 +43,20 @@
     [F.NONE]: '#000', [F.GRASS]: '#5b7a3a', [F.DIRT]: '#7a6040', [F.ASPHALT]: '#3b3d40', [F.SIDEWALK]: '#9a9890',
     [F.WOOD]: '#a07a4c', [F.TILE]: '#c8cfd0', [F.CARPET]: '#8a5a5a', [F.CONCRETE]: '#80807a', [F.WATER]: '#2d5d86',
     [F.ROAD_LINE]: '#d8b83a', [F.GRAVEL]: '#8c877a', [F.DARK_GRASS]: '#3c5a2a', [F.SAND]: '#cdbb88', [F.LINOLEUM]: '#b9b09a',
+    [F.DOCK]: '#b08a5a', [F.PORCH]: '#b8925e', [F.POOL]: '#4ab0d8',
   };
   const WALL_COL = {
     [W.WOOD]: '#e8dcc0', [W.BRICK]: '#b0553d', [W.PLASTER]: '#f2efe6', [W.FENCE_WOOD]: '#6b4a2a', [W.FENCE_METAL]: '#9aa3a8',
     [W.HEDGE]: '#234a1c', [W.CONCRETE]: '#c0c0bb', [W.GLASS]: '#9fd4ec', [W.WINDOW]: '#7cc4ea', [W.DOOR]: '#6a3a1a', [W.GARAGE_DOOR]: '#707880',
+    [W.FENCE_GATE]: '#d0a050',
   };
+  const MARK_STYLE = { center_dashed: ['#e8c040', [S * 0.8, S * 0.8], 1.2], center_solid: ['#e8c040', [], 1.6], crosswalk: ['#f0f0f0', [2, 2], S * 0.8],
+    stop: ['#ffffff', [], 1.8], parking: ['#e8e8e8', [], 1], rail: ['#5a4a3a', [3, 2], S * 0.9], court: ['#f0f0f0', [], 1] };
   const OBJ_COL = {
     tree: '#1f4a18', pine: '#173c22', bush: '#2f6a26', rock: '#77756e', car: '#c43c3c', police_car: '#1b2a6a', ambulance: '#f0f0f0',
     lamp_post: '#ffe070', mailbox: '#3060c0', trash_can: '#4a5a4a', dumpster: '#2a5a3a', bench: '#8a6a44', fuel_pump: '#e0b020',
     grave: '#b8b8b0', rug: 'rgba(160,60,60,0.45)', fence_gate: '#c09050', tire: '#222', barrel: '#6a4a30', log_pile: '#7a5020',
+    pickup: '#8a6a3a', grill: '#333', clothesline: '#ddd', watchtower: '#6a4a2a', fountain: '#9ac8e0',
     picnic_table: '#9a7040', swing: '#aa5555', pallet: '#b09060', crate: '#a07840',
   };
   const FURN = '#2a2320';
@@ -77,6 +82,14 @@
       ctx.fillStyle = FLOOR_COL[m.floor[i]] || '#f0f';
       ctx.fillRect(x * S, y * S, S, S);
     }
+    // marcas de rua (linhas finas)
+    for (const mk of m.roadMarks || []) {
+      const st = MARK_STYLE[mk.type] || ['#f0f', [], 1];
+      ctx.strokeStyle = st[0]; ctx.setLineDash(st[1]); ctx.lineWidth = st[2];
+      ctx.beginPath(); ctx.moveTo(mk.x0 * S, mk.y0 * S); ctx.lineTo(mk.x1 * S, mk.y1 * S); ctx.stroke();
+    }
+    ctx.setLineDash([]);
+    for (const b of m.bridges || []) { ctx.strokeStyle = '#ddd'; ctx.lineWidth = 1; ctx.strokeRect(b.x * S, b.y * S, b.w * S, b.h * S); }
     if ($('rooms').checked) {
       for (const r of m.rooms) {
         ctx.fillStyle = 'hsla(' + ((r.id * 67) % 360) + ',70%,55%,0.35)';
@@ -90,7 +103,7 @@
       ctx.fillStyle = col;
       const pad = o.type === 'tree' || o.type === 'pine' || o.type === 'bush' ? S * 0.12 : S * 0.08;
       ctx.fillRect(o.x * S + pad, o.y * S + pad, o.w * S - pad * 2, o.h * S - pad * 2);
-      if (o.type === 'car' || o.type === 'police_car' || o.type === 'ambulance') { // capô
+      if (o.type === 'car' || o.type === 'police_car' || o.type === 'ambulance' || o.type === 'pickup') { // capô
         const cx = (o.x + o.w / 2) * S, cy = (o.y + o.h / 2) * S, d = [[1, 0], [0, 1], [-1, 0], [0, -1]][o.rot];
         ctx.fillStyle = '#ffd'; ctx.fillRect(cx + d[0] * (o.w * S / 2 - S * 0.35) - 1, cy + d[1] * (o.h * S / 2 - S * 0.35) - 1, 3, 3);
       }
@@ -116,7 +129,7 @@
         ctx.fillStyle = '#e8e4d8'; ctx.fillRect(x * S, y * S, S, S);
         ctx.fillStyle = st & WS.BROKEN ? '#e04040' : st & WS.CURTAIN ? '#5a86a8' : WALL_COL[wv];
         ctx.fillRect(x * S + 1, y * S + 1, S - 2, S - 2);
-      } else if (wv === W.DOOR || wv === W.GARAGE_DOOR) {
+      } else if (wv === W.DOOR || wv === W.GARAGE_DOOR || wv === W.FENCE_GATE) {
         ctx.fillStyle = st & WS.OPEN ? '#e0a060' : st & WS.LOCKED ? '#ff2a2a' : WALL_COL[wv];
         ctx.fillRect(x * S, y * S, S, S);
       } else if (wv === W.FENCE_WOOD || wv === W.FENCE_METAL) {

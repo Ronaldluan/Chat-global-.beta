@@ -16,8 +16,8 @@
     TILE_W: 64,            // largura do losango isométrico em px
     TILE_H: 32,            // altura do losango isométrico em px
     WALL_H: 80,            // altura visual de uma parede em px
-    MAP_W: 140,            // tamanho do mapa em tiles
-    MAP_H: 140,
+    MAP_W: 180,            // tamanho do mapa em tiles
+    MAP_H: 180,
     MINUTES_PER_SECOND: 1, // 1 s real = 1 min de jogo (1 dia = 24 min)
     START_HOUR: 9,         // o jogo começa às 9h do dia 1 (julho)
     PLAYER_RADIUS: 0.28,
@@ -29,12 +29,16 @@
     NONE: 0, GRASS: 1, DIRT: 2, ASPHALT: 3, SIDEWALK: 4, WOOD: 5,
     TILE: 6, CARPET: 7, CONCRETE: 8, WATER: 9, ROAD_LINE: 10, GRAVEL: 11,
     DARK_GRASS: 12, SAND: 13, LINOLEUM: 14,
+    DOCK: 15,   // píer/ponte de madeira sobre água (render: água por baixo)
+    PORCH: 16,  // varanda/deck de madeira externo
+    POOL: 17,   // piscina (bloqueia andar como água)
   };
 
   // Tipos de parede/estrutura (state.map.wall) — ocupam o tile inteiro
   G.WALL = {
     NONE: 0, WOOD: 1, BRICK: 2, PLASTER: 3, FENCE_WOOD: 4, FENCE_METAL: 5,
     DOOR: 6, WINDOW: 7, GARAGE_DOOR: 8, HEDGE: 9, CONCRETE: 10, GLASS: 11,
+    FENCE_GATE: 12, // portão de cerca (abre/fecha/tranca como porta; não bloqueia visão)
   };
 
   // Bits de state.map.wallState
