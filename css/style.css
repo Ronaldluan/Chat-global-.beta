@@ -1,0 +1,4 @@
+/* STUB — será substituído pela etapa de UI */
+html, body { margin: 0; padding: 0; overflow: hidden; background: #0b0d0c; }
+#game { display: block; width: 100vw; height: 100vh; }
+#ui { position: fixed; inset: 0; pointer-events: none; font-family: Georgia, serif; color: #ddd; }
