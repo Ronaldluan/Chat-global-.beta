@@ -220,7 +220,12 @@
       if (e.button === 2) I.mouse.right = false;
     });
     canvas.addEventListener('contextmenu', (e) => e.preventDefault());
-    canvas.addEventListener('wheel', (e) => { I.mouse.wheel += Math.sign(e.deltaY); e.preventDefault(); }, { passive: false });
+    canvas.addEventListener('wheel', (e) => {
+      // Normaliza: 1 "clique" de roda ≈ 1.0; trackpads geram frações. Linhas/páginas convertidas.
+      const k = e.deltaMode === 1 ? 1 / 3 : e.deltaMode === 2 ? 3 : 1 / 100;
+      I.mouse.wheel = U.clamp(I.mouse.wheel + e.deltaY * k, -3, 3);
+      e.preventDefault();
+    }, { passive: false });
   };
   I.updateWorldMouse = function () {
     const w = G.iso.toWorld(I.mouse.sx, I.mouse.sy);

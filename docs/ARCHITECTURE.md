@@ -268,6 +268,7 @@ Instância: `{ uid, type, cond (0..1 durabilidade), qty (munição/uso), uses (p
 | `zombie:thump` | `{x,y}` (batendo em porta/janela/barricada) |
 | `door:open` `door:close` `door:locked` `door:break` | `{x,y}` (+ `garage, group` no portão de garagem, `gate` no portão de cerca) |
 | `window:open` `window:close` `window:locked` `window:break` `window:climb` | `{x,y}` |
+| `window:curtain` | `{x,y,closed}` |
 | `barricade:add` `barricade:break` `barricade:remove` | `{x,y}` (um `barricade:break` por tábua) |
 | `fence:break` | `{x,y}` |
 | `item:pickup` `item:drop` `item:transfer` | `{item}` |

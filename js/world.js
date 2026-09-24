@@ -3444,7 +3444,9 @@
     const i = ty * m.w + tx;
     if (!isWinW(m.wall[i]) || (m.wallState[i] & WS.BROKEN)) return null;
     m.wallState[i] ^= WS.CURTAIN;
-    return !!(m.wallState[i] & WS.CURTAIN);
+    const closed = !!(m.wallState[i] & WS.CURTAIN);
+    G.events.emit('window:curtain', { x: tx, y: ty, closed });
+    return closed;
   };
   // Dá para pular por aqui? (janela aberta/quebrada sem barricada, cercas e portões inteiros)
   WD.canClimb = function (tx, ty) {
